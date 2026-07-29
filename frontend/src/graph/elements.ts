@@ -1,57 +1,110 @@
 import type { ElementDefinition } from 'cytoscape';
-import type { Connection, Location } from '../types';
+import type { Connection, Group, Location } from '../types';
+import { formatCoordinates } from './coordinateLayout';
+import {
+  EDGE_LABEL_FONT,
+  NODE_LABEL_FONT,
+  NODE_LINE_HEIGHT,
+  PORTAL_LABEL_FONT,
+  PORTAL_LINE_HEIGHT,
+  measureLabelWidth,
+  measureTextWidth,
+  wrapLabel
+} from './measure';
 import {
   PALETTE,
-  normaliseLineStyle,
+  effectiveLineStyle,
   normaliseShape,
+  shapeMetrics,
   weightToWidth
 } from './model';
+import { buildGroupTree, flattenGroupTree, renderableGroupIds } from './groups';
+import { isEffectivelyLocked } from './connectionRules';
+
+/* shared with the planner so rendering and routing can never disagree */
+export { isEffectivelyLocked };
 
 export type LabelMode = 'names' | 'all' | 'none';
 
 export interface BuildOptions {
   labelMode: LabelMode;
-  groupByLayer: boolean;
-  /** Positions from in-flight drags that have not been persisted yet. */
   positionOverrides?: Record<string, { x: number; y: number }>;
+  /** Pending (unsaved) stub offsets, keyed by portal node id. */
+  portalOffsetOverrides?: Record<string, { dx: number; dy: number }>;
+  /** Label id -> display name, for the "Names + Badges" mode. */
+  locationLabelNames?: Record<string, string>;
+  connectionLabelNames?: Record<string, string>;
 }
 
-/** A locked connection is open once every required location has been visited. */
-export function isEffectivelyLocked(
-  conn: Connection,
-  visited: ReadonlySet<string>
-): boolean {
-  if (!conn.locked) return false;
-  if (conn.requires.length === 0) return true; // permanent / manual gate
-  return conn.requires.some((id) => !visited.has(id));
+export const groupNodeId = (groupId: string) => `grp:${groupId}`;
+
+/** Ids we create transiently for ghosts / drag handles — never persisted. */
+export const isInternalId = (id: string) => id.startsWith('__');
+
+export const portalNodeId = (connectionId: string, side: 'out' | 'in') =>
+  `${connectionId}::${side}`;
+
+/** `<uuid>::out` / `<uuid>::in` -> parts. Stub *edges* (`::out-edge`) never match. */
+export function parsePortalId(id: string): { connectionId: string; side: 'out' | 'in' } | null {
+  const m = /^(.+)::(out|in)$/.exec(id);
+  return m ? { connectionId: m[1], side: m[2] as 'out' | 'in' } : null;
 }
 
-export function describeLock(
-  conn: Connection,
-  locations: Record<string, Location>
-): string {
+const MAX_LABEL_WIDTH = 170;
+
+export function describeLock(conn: Connection, locations: Record<string, Location>): string {
   if (!conn.locked) return '';
-  if (!conn.requires.length) {
-    return conn.lockNote || 'Locked (no unlock condition recorded).';
-  }
+  if (!conn.requires.length) return conn.lockNote || 'Locked (no unlock condition recorded).';
   const names = conn.requires.map((id) => locations[id]?.name || 'Unnamed Location');
   return `Unlocks after visiting: ${names.join(', ')}`;
 }
 
 const safeName = (l: Location | undefined) => (l?.name && l.name.trim()) || 'Unnamed';
 
+/** Size a node so the label fits *inside* the shape, not just its bounding box. */
+function boxFor(label: string, shape: string, font: string, lineHeight: number) {
+  const lines = label ? label.split('\n') : [];
+  const textW = lines.reduce((max, line) => Math.max(max, measureTextWidth(line, font)), 0);
+  const textH = Math.max(lines.length, 1) * lineHeight;
+  const m = shapeMetrics(shape);
+  return {
+    w: Math.max(48, Math.round(textW * m.wFactor + m.padX)),
+    h: Math.max(34, Math.round(textH * m.hFactor + m.padY)),
+    /* keep Cytoscape from re-wrapping differently than we measured */
+    textMaxWidth: Math.max(24, Math.ceil(textW) + 6),
+    textMarginY: m.textMarginY ?? 0
+  };
+}
+
 export function buildElements(
   locations: Location[],
   connections: Connection[],
+  groups: Group[],
   opts: BuildOptions
 ): ElementDefinition[] {
   const nodes: ElementDefinition[] = [];
   const edges: ElementDefinition[] = [];
 
   const overrides = opts.positionOverrides ?? {};
+  const offsetOverrides = opts.portalOffsetOverrides ?? {};
   const visited = new Set(locations.filter((l) => l.visited).map((l) => l.id));
   const byId = new Map(locations.map((l) => [l.id, l]));
   const showLabels = opts.labelMode !== 'none';
+
+  const memberCount = new Map<string, number>();
+  for (const l of locations) {
+    if (l.groupId) memberCount.set(l.groupId, (memberCount.get(l.groupId) ?? 0) + 1);
+  }
+  /* a grouping is drawn when it — or anything nested in it — holds a room */
+  const visible = renderableGroupIds(groups, memberCount);
+  const liveGroups = new Map(groups.filter((g) => visible.has(g.id)).map((g) => [g.id, g]));
+  const parentOf = (l: Location | undefined) =>
+    l?.groupId && liveGroups.has(l.groupId) ? groupNodeId(l.groupId) : undefined;
+
+  /* parents must be added before their children (compound nesting on add) */
+  const orderedGroups = flattenGroupTree(buildGroupTree([...liveGroups.values()])).map(
+    (n) => n.group
+  );
 
   const positionOf = (l: Location | undefined) => {
     if (!l) return undefined;
@@ -61,41 +114,67 @@ export function buildElements(
     return undefined;
   };
 
-  /* optional compound grouping by layer (floor / level / district) */
-  if (opts.groupByLayer) {
-    for (const layer of new Set(locations.map((l) => l.layer).filter(Boolean))) {
-      nodes.push({
-        data: { id: `layer:${layer}`, kind: 'layer', label: layer },
-        classes: 'layer-group',
-        selectable: false,
-        grabbable: false
-      });
-    }
+  /* -------------------------------------------------------- groupings */
+  for (const g of orderedGroups) {
+    nodes.push({
+      data: {
+        id: groupNodeId(g.id),
+        groupId: g.id,
+        kind: 'group',
+        label: showLabels ? g.name || 'Unnamed Grouping' : '',
+        fill: g.color || PALETTE.groupFill,
+        border: g.color || PALETTE.groupBorder,
+        /* the title falls back to the body colour until it is given its own */
+        textColor: g.textColor || g.color || PALETTE.groupBorder,
+        memberCount: memberCount.get(g.id) ?? 0,
+        /* sub-groupings are simply compound children of their parent */
+        parent: g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined
+      },
+      classes: 'group',
+      selectable: true,
+      grabbable: true
+    });
   }
 
-  /* ------------------------------------------------------------- locations */
+  /* -------------------------------------------------------- locations */
   for (const l of locations) {
     const hasNotes = l.notes.trim().length > 0;
-    const bits = [l.name || 'Unnamed Location'];
-    if (opts.labelMode === 'all') {
-      if (l.layer) bits.push(`«${l.layer}»`);
-      if (hasNotes) bits.push('📝');
+    const shape = normaliseShape(l.kind);
+
+    const lines = showLabels ? wrapLabel(l.name || 'Unnamed Location', MAX_LABEL_WIDTH) : [];
+    if (showLabels && opts.labelMode === 'all') {
+      const labelNames = (l.labelIds ?? [])
+        .map((id) => opts.locationLabelNames?.[id])
+        .filter(Boolean)
+        .join(', ');
+      const badges = [
+        formatCoordinates(l),
+        l.layer ? `«${l.layer}»` : '',
+        labelNames ? `#${labelNames}` : '',
+        hasNotes ? '📝' : ''
+      ]
+        .filter(Boolean)
+        .join(' ');
+      if (badges) lines.push(badges);
     }
+    const label = lines.join('\n');
+    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT);
 
     nodes.push({
       data: {
         id: l.id,
         kind: 'location',
-        label: showLabels ? bits.join('\n') : '',
+        label,
         name: l.name,
         layer: l.layer,
-        shape: normaliseShape(l.kind),
+        shape,
+        ...box,
         fill: l.color || (l.visited ? PALETTE.nodeFillVisited : PALETTE.nodeFill),
         border: l.visited ? PALETTE.nodeBorderVisited : PALETTE.nodeBorder,
         textColor: l.textColor || PALETTE.nodeText,
         visited: l.visited,
         hasNotes,
-        parent: opts.groupByLayer && l.layer ? `layer:${l.layer}` : undefined
+        parent: parentOf(l)
       },
       position: positionOf(l),
       classes: [
@@ -109,11 +188,13 @@ export function buildElements(
     });
   }
 
-  /* ----------------------------------------------------------- connections */
+  /* ------------------------------------------------------ connections */
   for (const c of connections) {
     const locked = isEffectivelyLocked(c, visited);
     const hasNotes = c.notes.trim().length > 0;
     const lineWidth = weightToWidth(c.weight);
+    /* colour is never forced by locked/ephemeral state — only by the user */
+    const lineColor = c.color || PALETTE.edge;
 
     const shared = {
       connectionId: c.id,
@@ -123,7 +204,8 @@ export function buildElements(
       gated: c.locked,
       ephemeral: c.ephemeral,
       hasNotes,
-      lineStyle: normaliseLineStyle(c.travelKind),
+      lineColor,
+      lineStyle: effectiveLineStyle(c, locked),
       lineWidth,
       lineWidthHl: lineWidth + 2,
       textColor: c.textColor || PALETTE.edgeText,
@@ -131,50 +213,94 @@ export function buildElements(
       targetArrow: c.arrowTarget ? 'triangle' : 'none'
     };
 
-    const label = (text: string) =>
+    const connLabelNames =
+      opts.labelMode === 'all'
+        ? (c.labelIds ?? [])
+            .map((id) => opts.connectionLabelNames?.[id])
+            .filter(Boolean)
+            .map((n) => `#${n}`)
+            .join(' ')
+        : '';
+
+    const decorate = (text: string) =>
       showLabels
-        ? [locked ? '🔒' : '', opts.labelMode === 'all' && hasNotes ? '📝' : '', text]
+        ? [
+            locked ? '🔒' : '',
+            opts.labelMode === 'all' && hasNotes ? '📝' : '',
+            text,
+            connLabelNames
+          ]
             .filter(Boolean)
             .join(' ')
         : '';
 
     if (!c.ephemeral) {
+      const label = decorate(c.name);
       edges.push({
         data: {
           ...shared,
           id: c.id,
           source: c.sourceId,
           target: c.targetId,
-          lineColor: c.color || (locked ? PALETTE.edgeLocked : PALETTE.edge),
-          label: label(c.name)
+          label,
+          labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT)
         },
-        classes: ['connection', locked ? 'locked' : '', hasNotes ? 'has-notes' : '']
-          .filter(Boolean)
-          .join(' ')
+        classes: ['connection', hasNotes ? 'has-notes' : ''].filter(Boolean).join(' ')
       });
       continue;
     }
 
-    /* ---- ephemeral: two detached stubs instead of one long line ---- */
+    /* ephemeral: two detached stubs instead of one long line */
     const src = byId.get(c.sourceId);
     const tgt = byId.get(c.targetId);
-    const glyph = c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
+    const glyph =
+      c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
     const suffix = c.name ? ` (${c.name})` : '';
-    const outColor = c.color || (locked ? PALETTE.edgeLocked : PALETTE.stubOut);
-    const inColor = c.color || (locked ? PALETTE.edgeLocked : PALETTE.stubIn);
     const srcPos = positionOf(src);
     const tgtPos = positionOf(tgt);
+
+    /** Stubs live at `anchor + offset`, so they travel with their room. */
+    const stub = (
+      storedDx: number | null,
+      storedDy: number | null,
+      defaultDx: number,
+      defaultDy: number,
+      id: string,
+      anchor: { x: number; y: number } | undefined
+    ) => {
+      const override = offsetOverrides[id];
+      const dx = override ? override.dx : storedDx ?? defaultDx;
+      const dy = override ? override.dy : storedDy ?? defaultDy;
+      return {
+        offset: { offsetX: dx, offsetY: dy },
+        position: anchor ? { x: anchor.x + dx, y: anchor.y + dy } : undefined
+      };
+    };
+
+    const outStub = stub(c.outDx, c.outDy, 170, 80, portalNodeId(c.id, 'out'), srcPos);
+    const inStub = stub(c.inDx, c.inDy, -170, -80, portalNodeId(c.id, 'in'), tgtPos);
+
+    const outLabel = showLabels
+      ? wrapLabel(`${locked ? '🔒 ' : ''}${glyph} To ${safeName(tgt)}${suffix}`, 190, PORTAL_LABEL_FONT).join('\n')
+      : '';
+    const inLabel = showLabels
+      ? wrapLabel(`${locked ? '🔒 ' : ''}From ${safeName(src)}${suffix} ${glyph}`, 190, PORTAL_LABEL_FONT).join('\n')
+      : '';
 
     nodes.push({
       data: {
         ...shared,
         id: `${c.id}::out`,
         portalSide: 'out',
-        lineColor: outColor,
-        label: showLabels ? `${locked ? '🔒 ' : ''}${glyph} To ${safeName(tgt)}${suffix}` : ''
+        anchorId: c.sourceId,
+        ...outStub.offset,
+        shape: 'tag',
+        parent: parentOf(src),
+        label: outLabel,
+        ...boxFor(outLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT)
       },
-      position: srcPos ? { x: srcPos.x + 150, y: srcPos.y + 60 } : undefined,
-      classes: ['portal', 'portal-out', locked ? 'locked' : ''].filter(Boolean).join(' ')
+      position: outStub.position,
+      classes: 'portal portal-out'
     });
 
     nodes.push({
@@ -182,11 +308,15 @@ export function buildElements(
         ...shared,
         id: `${c.id}::in`,
         portalSide: 'in',
-        lineColor: inColor,
-        label: showLabels ? `${locked ? '🔒 ' : ''}From ${safeName(src)}${suffix} ${glyph}` : ''
+        anchorId: c.targetId,
+        ...inStub.offset,
+        shape: 'tag',
+        parent: parentOf(tgt),
+        label: inLabel,
+        ...boxFor(inLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT)
       },
-      position: tgtPos ? { x: tgtPos.x - 150, y: tgtPos.y - 60 } : undefined,
-      classes: ['portal', 'portal-in', locked ? 'locked' : ''].filter(Boolean).join(' ')
+      position: inStub.position,
+      classes: 'portal portal-in'
     });
 
     edges.push({
@@ -195,10 +325,10 @@ export function buildElements(
         id: `${c.id}::out-edge`,
         source: c.sourceId,
         target: `${c.id}::out`,
-        lineColor: outColor,
-        label: ''
+        label: '',
+        labelWidth: 0
       },
-      classes: ['stub', 'stub-out', locked ? 'locked' : ''].filter(Boolean).join(' ')
+      classes: 'stub stub-out'
     });
 
     edges.push({
@@ -207,13 +337,12 @@ export function buildElements(
         id: `${c.id}::in-edge`,
         source: `${c.id}::in`,
         target: c.targetId,
-        lineColor: inColor,
-        label: ''
+        label: '',
+        labelWidth: 0
       },
-      classes: ['stub', 'stub-in', locked ? 'locked' : ''].filter(Boolean).join(' ')
+      classes: 'stub stub-in'
     });
   }
 
-  // Nodes first so Cytoscape can resolve edge endpoints in a single add().
   return [...nodes, ...edges];
 }

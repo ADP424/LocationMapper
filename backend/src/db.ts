@@ -7,7 +7,9 @@ const connectionString =
 export const pool = new Pool({
   connectionString,
   max: Number(process.env.PG_POOL_MAX ?? 10),
-  idleTimeoutMillis: 30_000
+  idleTimeoutMillis: 30_000,
+  /* fail fast instead of queueing forever when the database is gone */
+  connectionTimeoutMillis: 5_000
 });
 
 pool.on('error', (err) => {

@@ -2,9 +2,11 @@ import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { pool, waitForDatabase } from './db';
-import { HttpError } from './http';
+import { HttpError, ah, pgErrorResponse } from './http';
 import { migrate } from './migrations';
 import { connectionsRouter } from './routes/connections';
+import { groupsRouter } from './routes/groups';
+import { labelsRouter } from './routes/labels';
 import { locationsRouter } from './routes/locations';
 import { mapsRouter } from './routes/maps';
 
@@ -19,12 +21,21 @@ async function main() {
   app.use(cors({ origin: process.env.CORS_ORIGIN ?? true }));
   app.use(express.json({ limit: '32mb' }));
 
-  app.get('/api/health', async (_req, res) => {
-    const r = await pool.query('SELECT now() AS now');
-    res.json({ ok: true, db: r.rows[0].now });
-  });
+  /* a healthcheck must fail fast, not hang on a dead connection */
+  app.get(
+    '/api/health',
+    ah(async (_req, res) => {
+      const timeout = new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new HttpError(503, 'database did not respond')), 2_000)
+      );
+      const result = await Promise.race([pool.query('SELECT now() AS now'), timeout]);
+      res.json({ ok: true, db: (result as { rows: Array<{ now: string }> }).rows[0].now });
+    })
+  );
 
   app.use('/api/maps', mapsRouter);
+  app.use('/api', groupsRouter);
+  app.use('/api', labelsRouter);
   app.use('/api', locationsRouter);
   app.use('/api', connectionsRouter);
 
@@ -34,12 +45,14 @@ async function main() {
     if (err instanceof ZodError) {
       return res.status(400).json({ error: 'validation failed', details: err.issues });
     }
-    if (err instanceof HttpError) {
-      return res.status(err.status).json({ error: err.message });
+    if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+    const pg = pgErrorResponse(err);
+    if (pg) {
+      if (pg.status >= 500) console.error('[db]', err);
+      return res.status(pg.status).json(pg.body);
     }
     console.error('[error]', err);
-    const message = err instanceof Error ? err.message : 'internal error';
-    res.status(500).json({ error: message });
+    res.status(500).json({ error: err instanceof Error ? err.message : 'internal error' });
   });
 
   app.listen(PORT, () => console.log(`[api] listening on :${PORT}`));

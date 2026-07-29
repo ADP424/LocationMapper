@@ -1,24 +1,10 @@
 import { Router } from 'express';
 import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
-import { mapConnection } from '../mappers';
+import { fetchConnection as readConnection } from '../repo';
 import { connectionCreate, connectionUpdate, uuid } from '../validation';
 
 export const connectionsRouter = Router();
-
-async function readConnection(id: string) {
-  const { rows } = await query(
-    `SELECT c.*,
-            COALESCE(array_agg(r.location_id) FILTER (WHERE r.location_id IS NOT NULL), '{}') AS requires
-       FROM connections c
-       LEFT JOIN connection_requirements r ON r.connection_id = c.id
-      WHERE c.id = $1
-      GROUP BY c.id`,
-    [id]
-  );
-  if (!rows.length) throw notFound('connection');
-  return mapConnection(rows[0]);
-}
 
 async function assertSameMap(mapId: string, locationIds: string[]) {
   const unique = [...new Set(locationIds)];

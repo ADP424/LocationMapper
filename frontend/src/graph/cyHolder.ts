@@ -1,8 +1,8 @@
 import type { Core } from 'cytoscape';
+import { groupNodeId } from './elements';
 
 export const cyHolder: { cy: Core | null } = { cy: null };
 
-/** Pan/zoom to a location and select it. */
 export function focusLocation(id: string, select: (id: string) => void) {
   const cy = cyHolder.cy;
   select(id);
@@ -16,7 +16,6 @@ export function focusLocation(id: string, select: (id: string) => void) {
   );
 }
 
-/** Frame a connection: fit both endpoints (or its stubs) on screen. */
 export function focusConnection(id: string, select: (id: string) => void) {
   const cy = cyHolder.cy;
   select(id);
@@ -26,4 +25,14 @@ export function focusConnection(id: string, select: (id: string) => void) {
   if (all.empty()) return;
   cy.stop();
   cy.animate({ fit: { eles: all, padding: 120 } }, { duration: 350 });
+}
+
+export function focusGroup(id: string, select: (id: string) => void) {
+  const cy = cyHolder.cy;
+  select(id);
+  if (!cy) return;
+  const node = cy.getElementById(groupNodeId(id));
+  if (node.empty()) return;
+  cy.stop();
+  cy.animate({ fit: { eles: node.union(node.descendants()), padding: 90 } }, { duration: 350 });
 }

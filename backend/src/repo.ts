@@ -1,0 +1,153 @@
+import type { PoolClient } from 'pg';
+import { pool } from './db';
+import { badRequest, notFound } from './http';
+import { mapConnection, mapConnectionLabel, mapLocation, mapLocationLabel } from './mappers';
+import type { Connection, ConnectionLabel, Location, LocationLabel } from './types';
+
+const runner = (client?: PoolClient) => client ?? pool;
+
+/** Only these tables may be asked for their owning map; no SQL is interpolated. */
+const MAP_OWNER_SQL = {
+  groups: 'SELECT map_id FROM groups WHERE id = $1',
+  locations: 'SELECT map_id FROM locations WHERE id = $1',
+  connections: 'SELECT map_id FROM connections WHERE id = $1',
+  location_labels: 'SELECT map_id FROM location_labels WHERE id = $1',
+  connection_labels: 'SELECT map_id FROM connection_labels WHERE id = $1'
+} as const;
+
+export type MapOwnedTable = keyof typeof MAP_OWNER_SQL;
+
+const OWNER_LABEL: Record<MapOwnedTable, string> = {
+  groups: 'group',
+  locations: 'location',
+  connections: 'connection',
+  location_labels: 'location label',
+  connection_labels: 'connection label'
+};
+
+export async function mapIdOf(table: MapOwnedTable, id: string): Promise<string> {
+  const { rows } = await pool.query(MAP_OWNER_SQL[table], [id]);
+  if (!rows.length) throw notFound(OWNER_LABEL[table]);
+  return rows[0].map_id as string;
+}
+
+/** Every id must belong to `mapId`, or it's a 400. */
+export async function assertLocationsOnMap(mapId: string, ids: string[]) {
+  const unique = [...new Set(ids)];
+  if (!unique.length) return;
+  const { rows } = await pool.query(
+    `SELECT count(*)::int AS n FROM locations WHERE map_id = $1 AND id = ANY($2::uuid[])`,
+    [mapId, unique]
+  );
+  if (rows[0].n !== unique.length) {
+    throw badRequest('all referenced locations must belong to the same map');
+  }
+}
+
+const LOCATION_SQL = `
+  SELECT l.*,
+         COALESCE((SELECT array_agg(a.label_id ORDER BY a.applied_at, a.label_id)
+                     FROM location_label_assignments a
+                    WHERE a.location_id = l.id), '{}') AS label_ids
+    FROM locations l
+`;
+
+const CONNECTION_SQL = `
+  SELECT c.*,
+         COALESCE((SELECT array_agg(r.location_id)
+                     FROM connection_requirements r
+                    WHERE r.connection_id = c.id), '{}') AS requires,
+         COALESCE((SELECT array_agg(a.label_id ORDER BY a.applied_at, a.label_id)
+                     FROM connection_label_assignments a
+                    WHERE a.connection_id = c.id), '{}') AS label_ids
+    FROM connections c
+`;
+
+const CONNECTION_LABEL_SQL = `
+  SELECT cl.*,
+         COALESCE((SELECT array_agg(r.location_id)
+                     FROM connection_label_requirements r
+                    WHERE r.label_id = cl.id), '{}') AS default_requires
+    FROM connection_labels cl
+`;
+
+export async function fetchLocation(id: string, client?: PoolClient): Promise<Location> {
+  const { rows } = await runner(client).query(`${LOCATION_SQL} WHERE l.id = $1`, [id]);
+  if (!rows.length) throw notFound('location');
+  return mapLocation(rows[0]);
+}
+
+export async function fetchLocations(mapId: string, client?: PoolClient): Promise<Location[]> {
+  const { rows } = await runner(client).query(
+    `${LOCATION_SQL} WHERE l.map_id = $1 ORDER BY l.created_at`,
+    [mapId]
+  );
+  return rows.map(mapLocation);
+}
+
+export async function fetchLocationsByLabel(
+  labelId: string,
+  client?: PoolClient
+): Promise<Location[]> {
+  const { rows } = await runner(client).query(
+    `${LOCATION_SQL}
+      WHERE l.id IN (SELECT location_id FROM location_label_assignments WHERE label_id = $1)
+      ORDER BY l.created_at`,
+    [labelId]
+  );
+  return rows.map(mapLocation);
+}
+
+export async function fetchConnection(id: string, client?: PoolClient): Promise<Connection> {
+  const { rows } = await runner(client).query(`${CONNECTION_SQL} WHERE c.id = $1`, [id]);
+  if (!rows.length) throw notFound('connection');
+  return mapConnection(rows[0]);
+}
+
+export async function fetchConnections(mapId: string, client?: PoolClient): Promise<Connection[]> {
+  const { rows } = await runner(client).query(
+    `${CONNECTION_SQL} WHERE c.map_id = $1 ORDER BY c.created_at`,
+    [mapId]
+  );
+  return rows.map(mapConnection);
+}
+
+export async function fetchConnectionsByLabel(
+  labelId: string,
+  client?: PoolClient
+): Promise<Connection[]> {
+  const { rows } = await runner(client).query(
+    `${CONNECTION_SQL}
+      WHERE c.id IN (SELECT connection_id FROM connection_label_assignments WHERE label_id = $1)
+      ORDER BY c.created_at`,
+    [labelId]
+  );
+  return rows.map(mapConnection);
+}
+
+export async function fetchLocationLabels(mapId: string): Promise<LocationLabel[]> {
+  const { rows } = await pool.query(
+    `SELECT * FROM location_labels WHERE map_id = $1 ORDER BY name, created_at`,
+    [mapId]
+  );
+  return rows.map(mapLocationLabel);
+}
+
+export async function fetchLocationLabel(id: string): Promise<LocationLabel> {
+  const { rows } = await pool.query(`SELECT * FROM location_labels WHERE id = $1`, [id]);
+  if (!rows.length) throw notFound('location label');
+  return mapLocationLabel(rows[0]);
+}
+
+export async function fetchConnectionLabels(mapId: string): Promise<ConnectionLabel[]> {
+  const { rows } = await pool.query(`${CONNECTION_LABEL_SQL} WHERE cl.map_id = $1 ORDER BY cl.name, cl.created_at`, [
+    mapId
+  ]);
+  return rows.map(mapConnectionLabel);
+}
+
+export async function fetchConnectionLabel(id: string): Promise<ConnectionLabel> {
+  const { rows } = await pool.query(`${CONNECTION_LABEL_SQL} WHERE cl.id = $1`, [id]);
+  if (!rows.length) throw notFound('connection label');
+  return mapConnectionLabel(rows[0]);
+}

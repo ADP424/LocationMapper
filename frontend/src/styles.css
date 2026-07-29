@@ -130,18 +130,39 @@ ul { list-style: none; margin: 0; padding: 0; }
   align-items: center; text-align: center; gap: 8px; padding: 40px; color: var(--muted);
 }
 
-/* ----------------------------------------------------------- context menu */
-.context-menu {
-  position: absolute; z-index: 20; min-width: 196px;
+/* --------------------------------------------------- cascading menus */
+.menu-panel {
+  position: fixed; z-index: 2000; min-width: 214px; max-width: 340px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
-  box-shadow: 0 10px 28px #00000066; padding: 4px; display: flex; flex-direction: column;
+  box-shadow: 0 14px 34px #00000077; padding: 4px;
 }
-.context-menu button {
+.menu-items { display: flex; flex-direction: column; }
+.menu-row { position: relative; display: block; border: none; padding: 0; }
+.menu-heading {
+  padding: 6px 10px 2px; font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.menu-button {
+  width: 100%; display: flex; align-items: center; gap: 10px;
   background: none; border: none; border-radius: 6px; text-align: left;
-  padding: 7px 10px; font-size: 13px;
+  padding: 7px 10px; font-size: 13px; color: var(--fg);
 }
-.context-menu button:hover { background: var(--bg-3); color: var(--accent); }
-.context-menu button.danger:hover { color: var(--danger); }
+.menu-button:hover:not(:disabled), .menu-button.expanded { background: var(--bg-3); color: var(--accent); }
+.menu-button.danger:hover { color: var(--danger); }
+.menu-button.active { color: var(--gold); }
+.menu-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-arrow, .menu-check { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+
+/* grouping picker button (inspector) */
+.picker {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; font: inherit; color: var(--fg); text-align: left;
+}
+.picker:hover:not(:disabled) { border-color: var(--accent); }
+.picker-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-arrow { color: var(--muted); font-size: 11px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
 
 /* ------------------------------------------------------------- status bar */
 .statusbar {
@@ -160,7 +181,8 @@ ul { list-style: none; margin: 0; padding: 0; }
   border: 1px solid var(--line); border-radius: 8px; padding: 8px;
 }
 .endpoints .arrow { color: var(--gold); }
-.endpoints button.link { width: auto; }
+.endpoints button.link { width: auto; align-items: center; }
+.in-group { font-weight: 400; font-size: 11px; }
 .lock-banner {
   background: #341f1f; border: 1px solid #6b3631; color: #ffb4a2;
   padding: 6px 8px; border-radius: 6px; font-size: 12px;
@@ -184,3 +206,166 @@ ul { list-style: none; margin: 0; padding: 0; }
 .swatch.edge { height: 0; border-top: 3px solid #5a6b85; border-radius: 0; }
 .swatch.edge.locked { border-top: 3px dashed #c0392b; }
 .swatch.edge.stub { border-top: 3px dashed #6d4bb4; }
+
+/* ------------------------------------------------------------ groupings */
+.badge.group { color: #bcd4f0; border-color: #3c5878; }
+.group-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+  margin-right: 7px; vertical-align: baseline;
+}
+.swatch.group {
+  background: rgba(143, 167, 196, 0.25);
+  border: 2px solid #5d7a9e; border-radius: 6px;
+}
+button.link.subtle { font-size: 12px; color: var(--accent); padding: 0 2px; }
+
+/* headings inside the right-click menu */
+.context-heading {
+  padding: 6px 10px 2px; font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+
+/* ------------------------------------------------- marquee / multi select */
+.marquee {
+  position: absolute; pointer-events: none; z-index: 6;
+  border: 1.5px dashed #d6336c; background: rgba(214, 51, 108, 0.12); border-radius: 3px;
+}
+.canvas-hint.subtle {
+  top: auto; bottom: 14px; border-color: #d6336c; font-size: 11px; opacity: 0.9;
+}
+.badge.multi { color: #ffc2d6; border-color: #7a2e4a; }
+.disabled-field { opacity: 0.45; }
+.disabled-field input, .disabled-field textarea { cursor: not-allowed; }
+.swatch.edge.dashed { border-top: 3px dashed #5a6b85; }
+
+/* ---------------------------------------------------------------- labels */
+.badge.label { color: #ffd9a8; border-color: #6b5230; }
+.chip-list { display: flex; flex-direction: column; gap: 4px; }
+.chip {
+  display: flex; align-items: center; gap: 7px; padding: 3px 6px;
+  background: var(--bg-3); border: 1px solid var(--line); border-radius: 14px;
+}
+.chip-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.chip-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-btn {
+  background: none; border: 1px solid var(--line); border-radius: 10px;
+  padding: 1px 8px; font-size: 11px; color: var(--accent);
+}
+.chip-btn.danger { border-color: #5c2b2f; color: var(--danger); }
+
+.row.coords label { flex: 1; }
+.row.coords input { text-align: center; }
+
+/* three-up checkbox row with the box centred under its caption */
+.check-row.triple { justify-content: space-between; gap: 8px; }
+.check-row.triple .check-field { flex: 1; }
+.check-field.center { align-items: center; text-align: center; }
+.check-field.center .field-label { white-space: normal; }
+
+/* ------------------------------------------- centred header controls (#4) */
+.toolbar .inline-label,
+.toolbar .check-field,
+.toolbar .color-field {
+  align-items: center;
+  text-align: center;
+}
+.toolbar .inline-label select,
+.toolbar .inline-label input { text-align: center; }
+.toolbar .cog {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 30px; padding: 0; color: var(--muted);
+}
+.toolbar .cog:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ------------------------------------------------- graph scrollbars (#1) */
+.gscroll {
+  position: absolute; z-index: 7; background: #0b0e1455;
+  border: 1px solid var(--line); border-radius: 7px;
+}
+.gscroll-h { left: 8px; right: 20px; bottom: 6px; height: 11px; }
+.gscroll-v { top: 8px; bottom: 20px; right: 6px; width: 11px; }
+.gscroll-thumb {
+  position: absolute; background: #55657daa; border-radius: 6px;
+  transition: background 120ms;
+}
+.gscroll-h .gscroll-thumb { top: 1px; bottom: 1px; }
+.gscroll-v .gscroll-thumb { left: 1px; right: 1px; }
+.gscroll-thumb:hover, .gscroll-thumb:active { background: var(--accent); cursor: grab; }
+
+/* ------------------------------------------------- settings modal (#2/#3) */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 3000; background: #05070bbb;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.modal {
+  width: 460px; max-width: 100%; max-height: 86vh; overflow-y: auto;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 20px 50px #00000088; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; }
+.modal-head h2 { margin: 0; font-size: 13px; }
+.modal-section { display: flex; flex-direction: column; gap: 6px; }
+.modal-section h3 { margin: 0; }
+.modal-foot { display: flex; justify-content: space-between; gap: 8px; }
+.slider-row { display: flex; align-items: center; gap: 10px; }
+.slider-row input[type='range'] { flex: 1; width: auto; padding: 0; }
+.slider-row .num { width: 84px; flex: 0 0 auto; text-align: center; }
+.inline-label.tight { flex: 0 0 auto; align-items: center; gap: 3px; }
+
+/* ------------------------------- centred captions in the inspector & sidebar */
+.inspector label,
+.inspector .field,
+.inspector .check-field,
+.inspector .color-field,
+.inspector fieldset legend,
+.field-center {
+  align-items: center;
+  text-align: center;
+}
+/* …but typed prose still reads better left-aligned */
+.inspector input[type='text'],
+.inspector input:not([type]),
+.inspector textarea {
+  text-align: left;
+}
+.inspector .row.actions,
+.inspector .color-row,
+.inspector .check-row {
+  justify-content: center;
+}
+.inspector fieldset legend { width: 100%; }
+
+/* ----------------------------------------------------------- trip planner */
+.trip-list { display: flex; flex-direction: column; gap: 2px; }
+.trip-list li {
+  display: flex; align-items: center; gap: 5px;
+  border-bottom: 1px solid #1b2331; padding: 2px 2px 2px 0;
+}
+.trip-index {
+  flex: 0 0 auto; width: 19px; height: 19px; border-radius: 50%;
+  background: #3b2a6b; color: #d9ccff; font-size: 11px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.trip-list li:first-child .trip-index { background: #1f4536; color: #9fe3c2; }
+.trip-list li:last-child .trip-index { background: #4a1f1f; color: #ffb4a2; }
+.trip-summary { color: #c9b8ff; font-size: 12px; margin: 0; }
+.trip-fail { color: var(--danger); font-size: 12px; margin: 0; }
+.trip-leg { border-left: 2px solid #3b2a6b; padding-left: 8px; margin-top: 6px; }
+.trip-leg h3 { margin: 2px 0; }
+.reset-visited { width: 100%; margin-top: 4px; border-color: #5c2b2f; color: #e0a0a6; }
+.reset-visited:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+.trip-pickup > .link .hit-title { color: #c9b8ff; }
+.trip-pickup .needs { color: #e0a0a6; }
+.trip-pickup .opens { color: #9fe3c2; }
+.trip-detours { border-left: 2px dashed #6d28d9; padding-left: 8px; margin: 4px 0; }
+.trip-detours-head { font-size: 11px; color: #c9b8ff; }
+.outcome-optimal { color: var(--ok); font-size: 12px; margin: 0; }
+.outcome-suboptimal { color: var(--gold); font-size: 12px; margin: 0; }
+.outcome-impossible { color: var(--danger); font-size: 12px; margin: 0; }
+.trip-stale {
+  margin: 0; font-size: 11px; color: var(--gold);
+  border-left: 2px solid var(--gold); padding-left: 7px;
+}
+.trip-running { display: flex; flex-direction: column; gap: 6px; align-items: stretch; font-size: 12px; }
+.trip-running .pulse { color: #c9b8ff; text-align: center; }

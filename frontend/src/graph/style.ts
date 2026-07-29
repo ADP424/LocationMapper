@@ -1,91 +1,88 @@
 import { PALETTE } from './model';
 
-/**
- * Cytoscape stylesheet (typed loosely on purpose — Cytoscape's own style
- * typings are narrower than the runtime).
- *
- * Ordering matters: Cytoscape resolves conflicts by *last matching rule*,
- * so highlight / fade / ghost rules must stay at the bottom.
- */
+/** Ordering matters: Cytoscape resolves conflicts by *last matching rule*. */
 export const graphStyle: any[] = [
-  /* ------------------------------------------------------------- locations */
+  /* -------------------------------------------------------- groupings */
+  {
+    selector: 'node.group',
+    style: {
+      shape: 'round-rectangle',
+      'background-color': 'data(fill)',
+      'background-opacity': 0.18,
+      'border-color': 'data(border)',
+      'border-width': 'data(borderView)',
+      'border-opacity': 0.75,
+      padding: 'data(paddingView)',
+      label: 'data(label)',
+      color: 'data(textColor)',
+      'font-size': 'data(fontView)',
+      'font-weight': 'bold',
+      'text-valign': 'top',
+      'text-halign': 'center',
+      'text-margin-y': 'data(groupLabelOffsetView)',
+      'min-zoomed-font-size': 'data(minFontView)',
+      'z-compound-depth': 'bottom',
+      'transition-property': 'border-color, background-opacity, opacity',
+      'transition-duration': '120ms'
+    }
+  },
+
+  /* -------------------------------------------------------- locations */
   {
     selector: 'node.location',
     style: {
       shape: 'data(shape)',
+      width: 'data(wView)',
+      height: 'data(hView)',
       'background-color': 'data(fill)',
       'border-color': 'data(border)',
-      'border-width': 2,
-      width: 'label',
-      height: 'label',
-      padding: '12px',
+      'border-width': 'data(borderView)',
       label: 'data(label)',
       color: 'data(textColor)',
       'text-wrap': 'wrap',
-      'text-max-width': '170px',
+      'text-max-width': 'data(textMaxWidthView)',
+      'text-margin-y': 'data(textMarginYView)',
       'text-valign': 'center',
       'text-halign': 'center',
-      'font-size': 12,
+      'font-size': 'data(fontView)',
       'font-family': 'Inter, system-ui, sans-serif',
-      'min-zoomed-font-size': 6,
-      'overlay-color': PALETTE.neighbour,
-      'overlay-opacity': 0,
-      'transition-property': 'border-color, border-width, opacity',
+      'min-zoomed-font-size': 'data(minFontView)',
+      'transition-property': 'border-color, opacity',
       'transition-duration': '120ms'
     }
   },
-  { selector: 'node.location.has-notes', style: { 'border-style': 'double', 'border-width': 5 } },
+  { selector: 'node.location.has-notes', style: { 'border-style': 'double' } },
   { selector: 'node.location.pinned', style: { 'border-color': '#b7791f' } },
 
-  /* ------------------------------------------------------- layer compounds */
-  {
-    selector: 'node.layer-group',
-    style: {
-      shape: 'round-rectangle',
-      'background-color': '#dde5f0',
-      'background-opacity': 0.6,
-      'border-color': '#9aa9bf',
-      'border-width': 1,
-      'border-style': 'dashed',
-      label: 'data(label)',
-      color: '#55657d',
-      'text-valign': 'top',
-      'text-halign': 'center',
-      'font-size': 16,
-      padding: '28px'
-    }
-  },
-
-  /* ------------------------------------------------------- ephemeral stubs */
+  /* -------------------------------------------------- ephemeral stubs */
   {
     selector: 'node.portal',
     style: {
       shape: 'tag',
+      width: 'data(wView)',
+      height: 'data(hView)',
       'background-color': '#ffffff',
       'background-opacity': 0.96,
-      'border-width': 1.5,
+      'border-width': 'data(borderView)',
       'border-style': 'dashed',
       'border-color': 'data(lineColor)',
-      width: 'label',
-      height: 'label',
-      padding: '7px',
       label: 'data(label)',
       color: 'data(lineColor)',
-      'font-size': 10,
+      'font-size': 'data(fontView)',
       'font-style': 'italic',
       'text-valign': 'center',
       'text-halign': 'center',
       'text-wrap': 'wrap',
-      'text-max-width': '180px',
-      'min-zoomed-font-size': 6
+      'text-max-width': 'data(textMaxWidthView)',
+      'min-zoomed-font-size': 'data(minFontView)'
     }
   },
 
-  /* ----------------------------------------------------------------- edges */
+  /* ------------------------------------------------------------ edges */
   {
     selector: 'edge',
     style: {
-      width: 'data(lineWidth)',
+      width: 'data(lineWidthView)',
       'line-color': 'data(lineColor)',
       'line-style': 'data(lineStyle)',
       'target-arrow-color': 'data(lineColor)',
@@ -96,26 +93,59 @@ export const graphStyle: any[] = [
       'curve-style': 'bezier',
       label: 'data(label)',
       color: 'data(textColor)',
-      'font-size': 11,
+      'font-size': 'data(fontView)',
       'text-background-color': '#f2f5fa',
       'text-background-opacity': 0.88,
       'text-background-padding': '2px',
       'text-background-shape': 'roundrectangle',
       'text-rotation': 'autorotate',
-      'min-zoomed-font-size': 7,
-      'transition-property': 'line-color, opacity, width',
+      'min-zoomed-font-size': 'data(minFontView)',
+      'transition-property': 'line-color, opacity',
       'transition-duration': '120ms'
     }
   },
-  {
-    selector: 'edge.stub',
-    style: { 'curve-style': 'straight', 'line-style': 'dashed', 'arrow-scale': 1 }
-  },
+  /* stubs keep their own geometry but NOT their own colour or dash pattern */
+  { selector: 'edge.stub', style: { 'curve-style': 'straight', 'arrow-scale': 1 } },
 
-  /* ------------------------------------------------------ selection states */
+  /* ------------------------------------------------- selection states */
+  {
+    selector: 'node:selected',
+    style: {
+      'border-color': PALETTE.multiSelect,
+      'border-width': 'data(borderStrongView)',
+      'overlay-color': PALETTE.multiSelect,
+      'overlay-opacity': 0.1,
+      'overlay-padding': 5
+    }
+  },
+  { selector: 'node.group:selected', style: { 'overlay-opacity': 0, 'border-width': 'data(borderNeighbourView)' } },
+
+  /* ------------------------------------------------------- planned trip */
+  {
+    selector: 'node.route-node',
+    style: {
+      'border-color': PALETTE.route,
+      'border-width': 'data(borderStrongView)',
+      'z-index': 1100
+    }
+  },
+  {
+    selector: 'edge.route-edge',
+    style: {
+      'line-color': PALETTE.route,
+      'target-arrow-color': PALETTE.route,
+      'source-arrow-color': PALETTE.route,
+      width: 'data(lineWidthHlView)',
+      'z-index': 1100
+    }
+  },
+  { selector: 'node.route-stop', style: { 'border-color': PALETTE.routeStop, 'border-style': 'double' } },
+  { selector: 'node.route-start', style: { 'border-color': PALETTE.routeStart, 'border-style': 'double' } },
+  { selector: 'node.route-end', style: { 'border-color': PALETTE.routeEnd, 'border-style': 'double' } },
+
   {
     selector: 'node.hl-neighbor',
-    style: { 'border-color': PALETTE.neighbour, 'border-width': 4, 'z-index': 900 }
+    style: { 'border-color': PALETTE.neighbour, 'border-width': 'data(borderNeighbourView)', 'z-index': 900 }
   },
   {
     selector: 'edge.hl-neighbor',
@@ -126,15 +156,18 @@ export const graphStyle: any[] = [
       'z-index': 900
     }
   },
-  /* node highlight = border only, so the box keeps hugging its label */
   {
     selector: 'node.hl-primary',
     style: {
       'border-color': PALETTE.highlight,
-      'border-width': 5,
+      'border-width': 'data(borderStrongView)',
       'border-style': 'solid',
       'z-index': 999
     }
+  },
+  {
+    selector: 'node.group.hl-primary',
+    style: { 'background-opacity': 0.3, 'border-opacity': 1 }
   },
   {
     selector: 'edge.hl-primary',
@@ -142,26 +175,36 @@ export const graphStyle: any[] = [
       'line-color': PALETTE.highlight,
       'target-arrow-color': PALETTE.highlight,
       'source-arrow-color': PALETTE.highlight,
-      width: 'data(lineWidthHl)',
+      width: 'data(lineWidthHlView)',
       'z-index': 999
     }
   },
   {
     selector: 'node.connect-source',
-    style: { 'border-color': '#d6336c', 'border-width': 5, 'border-style': 'double' }
+    style: {
+      'border-color': PALETTE.multiSelect,
+      'border-width': 'data(borderStrongView)',
+      'border-style': 'double'
+    }
   },
   { selector: '.faded', style: { opacity: 0.18, 'text-opacity': 0.12 } },
-  { selector: ':parent.faded', style: { opacity: 0.35 } },
+  { selector: 'node.group.faded', style: { opacity: 0.35 } },
 
-  /* ----------------------------------------- rubber band while connecting */
+  /* ------------------------------- transient helpers (ghosts, handles) */
   {
     selector: 'node.ghost',
-    style: { width: 6, height: 6, 'background-color': PALETTE.highlight, events: 'no', label: '' }
+    style: {
+      width: 'data(wView)',
+      height: 'data(hView)',
+      'background-color': PALETTE.highlight,
+      events: 'no',
+      label: ''
+    }
   },
   {
     selector: 'edge.ghost-edge',
     style: {
-      width: 3,
+      width: 'data(lineWidthView)',
       'line-color': PALETTE.highlight,
       'line-style': 'dashed',
       'target-arrow-color': PALETTE.highlight,
@@ -170,5 +213,40 @@ export const graphStyle: any[] = [
       events: 'no',
       label: ''
     }
+  },
+  {
+    selector: 'node.handle',
+    style: {
+      shape: 'ellipse',
+      width: 'data(wView)',
+      height: 'data(hView)',
+      label: '',
+      'background-color': PALETTE.highlight,
+      'border-width': 'data(borderView)',
+      'border-color': '#ffffff',
+      'overlay-opacity': 0,
+      'z-index': 1500,
+      /* rooms inside a grouping are compound children and would otherwise be
+         hit-tested above an orphan node no matter what z-index it has */
+      'z-compound-depth': 'top'
+    }
+  },
+  { selector: 'edge.reconnecting', style: { opacity: 0.22 } },
+  {
+    selector: 'edge.reconnect-edge',
+    style: {
+      width: 'data(lineWidthView)',
+      'line-color': PALETTE.highlight,
+      'line-style': 'dashed',
+      'curve-style': 'straight',
+      'target-arrow-shape': 'triangle',
+      'target-arrow-color': PALETTE.highlight,
+      events: 'no',
+      label: ''
+    }
+  },
+  {
+    selector: 'node.drop-target',
+    style: { 'border-color': PALETTE.highlight, 'border-width': 'data(borderStrongView)', 'z-index': 1200 }
   }
 ];

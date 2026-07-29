@@ -1,11 +1,16 @@
 import { useEffect } from 'react';
 import DetailsPanel from './components/DetailsPanel';
 import GraphCanvas from './components/GraphCanvas';
+import GroupPanel from './components/GroupPanel';
+import LabelPanel from './components/LabelPanel';
 import Legend from './components/Legend';
 import MapPicker from './components/MapPicker';
 import SearchPanel from './components/SearchPanel';
+import SettingsModal from './components/SettingsModal';
 import Toolbar from './components/Toolbar';
+import TripPlanner from './components/TripPlanner';
 import { useGraphStore } from './state/store';
+import { pushEscapeHandler } from './utils/escapeStack';
 
 export default function App() {
   const init = useGraphStore((s) => s.init);
@@ -23,18 +28,20 @@ export default function App() {
   }, [init]);
 
   useEffect(() => {
+    /* bottom of the Escape stack: only reached when no overlay is open */
+    const offEscape = pushEscapeHandler(() => {
+      const store = useGraphStore.getState();
+      store.closeContextMenu();
+      store.setMode('select');
+      store.select(null);
+    });
+
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const typing =
         t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
       const store = useGraphStore.getState();
 
-      if (e.key === 'Escape') {
-        store.closeContextMenu();
-        store.setMode('select');
-        store.select(null);
-        return;
-      }
       if (typing) return;
       if ((e.key === 'Delete' || e.key === 'Backspace') && store.selection) {
         e.preventDefault();
@@ -45,16 +52,23 @@ export default function App() {
       if (e.key === 'l') store.runLayout();
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      offEscape();
+    };
   }, []);
 
   return (
     <div className="app">
       <Toolbar />
+      <SettingsModal />
       <div className="body">
         <nav className="sidebar">
           <MapPicker />
           <SearchPanel />
+          <TripPlanner />
+          <GroupPanel />
+          <LabelPanel />
           <Legend />
         </nav>
 
