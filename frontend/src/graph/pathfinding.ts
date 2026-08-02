@@ -75,14 +75,11 @@ export interface RoutePlan {
   locationIds: string[];
   connectionIds: string[];
   detourIds: string[];
-  detours: Array<DetourPickup & { legIndex: number }>;
-  blocked: number;
   impossibleLeg: number | null;
   statesExplored: number;
   elapsedMs: number;
   keysRelevant: number;
   keysPruned: number;
-  arcsPruned: number;
 }
 
 /* ------------------------------------------------ worker-friendly inputs */
@@ -219,14 +216,11 @@ function emptyPlan(mode: RouteMode, outcome: RouteOutcome): RoutePlan {
     locationIds: [],
     connectionIds: [],
     detourIds: [],
-    detours: [],
-    blocked: 0,
     impossibleLeg: null,
     statesExplored: 0,
     elapsedMs: 0,
     keysRelevant: 0,
-    keysPruned: 0,
-    arcsPruned: 0
+    keysPruned: 0
   };
 }
 
@@ -431,11 +425,9 @@ export async function planRoute(
   }
 
   const searchOut: number[][] = Array.from({ length: n }, () => []);
-  let arcsPruned = 0;
   for (let ai = 0; ai < arcCount; ai++) {
     const ci = arcConn[ai];
     if (openable(ci) && relevantConn[ci]) searchOut[arcFrom[ai]].push(ai);
-    else arcsPruned++;
   }
 
   /* rule 3 (doors whose prerequisites are already visited) is implicit:
@@ -751,7 +743,6 @@ export async function planRoute(
   const locationIds: string[] = [];
   const connectionIds: string[] = [];
   const detourIds: string[] = [];
-  const detours: Array<DetourPickup & { legIndex: number }> = [];
   const addLoc = (id: string) => {
     if (index.has(id) && !seenLoc.has(id)) {
       seenLoc.add(id);
@@ -766,12 +757,11 @@ export async function planRoute(
       connectionIds.push(s.connectionId);
     }
   }
-  legs.forEach((leg, i) =>
-    leg.detours.forEach((d) => {
-      detours.push({ ...d, legIndex: i });
+  for (const leg of legs) {
+    for (const d of leg.detours) {
       if (!detourIds.includes(d.locationId)) detourIds.push(d.locationId);
-    })
-  );
+    }
+  }
 
   return {
     mode,
@@ -785,13 +775,10 @@ export async function planRoute(
     locationIds,
     connectionIds,
     detourIds,
-    detours,
-    blocked: legs.filter((l) => !l.found).length,
     impossibleLeg: outcome === 'impossible' ? legs.findIndex((l) => !l.found) : null,
     statesExplored: stNode.length,
     elapsedMs: Math.round(nowMs() - t0),
     keysRelevant: keyCount,
-    keysPruned: Math.max(0, allKeys.size - keyCount),
-    arcsPruned
+    keysPruned: Math.max(0, allKeys.size - keyCount)
   };
 }

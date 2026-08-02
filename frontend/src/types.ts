@@ -34,12 +34,13 @@ export interface Location {
   groupId: string | null;
   name: string;
   kind: string;
+  /** Scalar on the drawn box, relative to every other location. */
+  size: number;
   layer: string;
   notes: string;
   color: string;
   textColor: string;
   visited: boolean;
-  pinned: boolean;
   x: number | null;
   y: number | null;
   coordX: number | null;
@@ -85,6 +86,7 @@ export interface LocationLabel {
   color: string;
   notes: string;
   defaultKind: string;
+  defaultSize: number | null;
   defaultColor: string;
   defaultTextColor: string;
   defaultLayer: string;

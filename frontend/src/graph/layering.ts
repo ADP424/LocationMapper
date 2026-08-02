@@ -1,0 +1,192 @@
+import type { Core } from 'cytoscape';
+import type { Group, Location } from '../types';
+import { coordValue, offPlaneAxis, type CoordinatePlane } from './coordinateLayout';
+import { groupNodeId } from './elements';
+import { buildGroupTree, type GroupTreeNode } from './groups';
+import { baseSize } from './viewScale';
+
+export interface GroupLayer {
+  /** 1 = drawn first, i.e. at the bottom of the stack. */
+  order: number;
+  total: number;
+  /** Why it sits there ("Z 2"); empty when the order came from box size. */
+  note: string;
+}
+
+/* The higher a grouping sits, the more solid it reads — the conventional way to
+   see through a stack of translucent sheets and still know which is on top.
+   Rooms get no ramp: they are opaque, so the occlusion order is the cue. */
+const FILL_OPACITY = [0.08, 0.4] as const;
+const BORDER_OPACITY = [0.35, 1] as const;
+
+const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
+const pretty = (n: number) => String(Math.round(n * 100) / 100);
+
+/**
+ * Decide the stacking order of the groupings.
+ *
+ *  - coordinate layouts: along the axis the plane does not show, lowest first,
+ *    so an X/Y plane stacks its groupings by Z like a pile of floors;
+ *  - every other layout: by the area each box ended up covering, biggest first,
+ *    so a large box can never hide the small ones sitting in its footprint.
+ *
+ * The indices come from a pre-order walk, which guarantees a sub-grouping is
+ * drawn over its parent no matter what the ordering says, and keeps each
+ * subtree contiguous so a grouping and its contents stack as one unit.
+ */
+export function computeGroupLayers(
+  cy: Core,
+  groups: Group[],
+  locations: Location[],
+  plane: CoordinatePlane | null
+): Record<string, GroupLayer> {
+  const drawn = groups.filter((g) => cy.getElementById(groupNodeId(g.id)).nonempty());
+  if (!drawn.length) return {};
+
+  const axis = plane ? offPlaneAxis(plane) : null;
+
+  const roomsOf = new Map<string, Location[]>();
+  for (const l of locations) {
+    if (!l.groupId) continue;
+    const list = roomsOf.get(l.groupId);
+    if (list) list.push(l);
+    else roomsOf.set(l.groupId, [l]);
+  }
+
+  /* a compound node's box is its contents plus padding, so this is the real
+     footprint the user sees — and only meaningful once positions have settled */
+  const areaOf = new Map<string, number>();
+  for (const g of drawn) {
+    const bb = cy.getElementById(groupNodeId(g.id)).boundingBox();
+    areaOf.set(g.id, Math.max(0, bb.w) * Math.max(0, bb.h));
+  }
+
+  /** Mean off-plane coordinate of every room nested inside, or null if none has one. */
+  const coordOf = new Map<string, number | null>();
+  const measure = (node: GroupTreeNode): { sum: number; count: number } => {
+    let sum = 0;
+    let count = 0;
+    for (const child of node.children) {
+      const inner = measure(child);
+      sum += inner.sum;
+      count += inner.count;
+    }
+    if (axis) {
+      for (const room of roomsOf.get(node.group.id) ?? []) {
+        const v = coordValue(room, axis);
+        if (v !== null) {
+          sum += v;
+          count++;
+        }
+      }
+    }
+    coordOf.set(node.group.id, count ? sum / count : null);
+    return { sum, count };
+  };
+
+  const tree = buildGroupTree(drawn);
+  tree.forEach(measure);
+
+  /** Bottom of the stack first. */
+  const compare = (a: Group, b: Group) => {
+    if (axis) {
+      const va = coordOf.get(a.id) ?? null;
+      const vb = coordOf.get(b.id) ?? null;
+      /* nothing to stack by: park it underneath everything that does have a coordinate */
+      const ca = va === null ? -Infinity : va;
+      const cb = vb === null ? -Infinity : vb;
+      if (ca !== cb) return ca - cb;
+    }
+    const aa = areaOf.get(a.id) ?? 0;
+    const ab = areaOf.get(b.id) ?? 0;
+    if (aa !== ab) return ab - aa; // the biggest footprint goes underneath
+    return (a.name || '').localeCompare(b.name || '') || a.id.localeCompare(b.id);
+  };
+
+  const layers: Record<string, GroupLayer> = {};
+  let order = 0;
+  const walk = (nodes: GroupTreeNode[]) => {
+    for (const node of [...nodes].sort((x, y) => compare(x.group, y.group))) {
+      const coord = coordOf.get(node.group.id) ?? null;
+      layers[node.group.id] = {
+        order: ++order,
+        total: drawn.length,
+        note: axis ? `${axis.toUpperCase()} ${coord === null ? '—' : pretty(coord)}` : ''
+      };
+      walk(node.children);
+    }
+  };
+  walk(tree);
+
+  return layers;
+}
+
+/** Push the grouping order onto the graph: z-index plus a readable opacity ramp. */
+export function applyGroupLayers(cy: Core, layers: Record<string, GroupLayer>) {
+  cy.batch(() => {
+    for (const [id, layer] of Object.entries(layers)) {
+      const node = cy.getElementById(groupNodeId(id));
+      if (node.empty()) continue;
+      /* a lone grouping keeps the neutral mid-ramp look */
+      const t = layer.total > 1 ? (layer.order - 1) / (layer.total - 1) : 0.5;
+      node.data({
+        zLayer: layer.order,
+        groupFillOpacity: lerp(FILL_OPACITY[0], FILL_OPACITY[1], t),
+        groupBorderOpacity: lerp(BORDER_OPACITY[0], BORDER_OPACITY[1], t)
+      });
+    }
+  });
+}
+
+/**
+ * Order the rooms by the same rule as the groupings:
+ *
+ *  - coordinate layouts: by the axis the plane does not show, lowest drawn
+ *    first, so a room on Z 0 sits under a room on Z 3 exactly as their
+ *    groupings do;
+ *  - every other layout: biggest box first, so a large room can never bury a
+ *    small one it happens to overlap.
+ *
+ * Leaf nodes all share one compound-depth band in Cytoscape, so `z-index`
+ * orders grouped and ungrouped rooms together — and every room still draws over
+ * every grouping box, which lives in the bottom band. Ephemeral stubs adopt
+ * their anchor room's layer, since they belong to it.
+ */
+export function applyRoomLayers(
+  cy: Core,
+  locations: Record<string, Location>,
+  plane: CoordinatePlane | null
+) {
+  const axis = plane ? offPlaneAxis(plane) : null;
+  const rooms = cy.nodes('.location');
+  if (rooms.empty()) return;
+
+  const ranked = rooms.map((node) => {
+    const room = locations[node.id()];
+    const coord = axis && room ? coordValue(room, axis) : null;
+    const box = baseSize(node); // base units, so the size scalar counts
+    return {
+      id: node.id(),
+      /* no coordinate on this axis: park it underneath the ones that have one */
+      coord: coord === null ? -Infinity : coord,
+      area: Math.max(0, box.w) * Math.max(0, box.h)
+    };
+  });
+
+  ranked.sort((a, b) => {
+    if (axis && a.coord !== b.coord) return a.coord - b.coord;
+    if (a.area !== b.area) return b.area - a.area; // the biggest box is drawn first
+    return a.id.localeCompare(b.id); // stable across re-renders
+  });
+
+  const layerOf = new Map<string, number>();
+  cy.batch(() => {
+    ranked.forEach((room, i) => {
+      layerOf.set(room.id, i + 1);
+      cy.getElementById(room.id).data('zLayer', i + 1);
+    });
+    cy.nodes('.portal').forEach((stub) => {
+      stub.data('zLayer', layerOf.get(stub.data('anchorId') as string) ?? 0);
+    });
+  });
+}

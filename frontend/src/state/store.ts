@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { api } from '../api';
 import { parsePortalId, type LabelMode } from '../graph/elements';
 import { descendantGroupIds } from '../graph/groups';
+import type { GroupLayer } from '../graph/layering';
 import type { LayoutName } from '../graph/layouts';
 import { arrowsFor, type Direction } from '../graph/model';
 import {
@@ -67,6 +68,8 @@ interface Store {
   map: GraphMap | null;
   mapId: string | null;
   groups: Record<string, Group>;
+  /** Stacking order of the groupings, recomputed after every arrangement. */
+  groupLayers: Record<string, GroupLayer>;
   locationLabels: Record<string, LocationLabel>;
   connectionLabels: Record<string, ConnectionLabel>;
   locations: Record<string, Location>;
@@ -112,6 +115,7 @@ interface Store {
   setLayout: (l: LayoutName) => void;
   runLayout: () => void;
   setLabelMode: (m: LabelMode) => void;
+  setGroupLayers: (layers: Record<string, GroupLayer>) => void;
   setConnectionDefaults: (d: Partial<ConnectionDefaults>) => void;
   setStatus: (s: string | null) => void;
   setError: (e: string | null) => void;
@@ -275,6 +279,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     map: null,
     mapId: null,
     groups: {},
+    groupLayers: {},
     locationLabels: {},
     connectionLabels: {},
     locations: {},
@@ -323,6 +328,7 @@ export const useGraphStore = create<Store>()((set, get) => {
           mapId: id,
           map: graph.map,
           groups: index(graph.groups),
+          groupLayers: {},
           locationLabels: index(graph.locationLabels),
           connectionLabels: index(graph.connectionLabels),
           locations: index(graph.locations),
@@ -358,6 +364,7 @@ export const useGraphStore = create<Store>()((set, get) => {
           mapId: null,
           map: null,
           groups: {},
+          groupLayers: {},
           locationLabels: {},
           connectionLabels: {},
           locations: {},
@@ -421,6 +428,15 @@ export const useGraphStore = create<Store>()((set, get) => {
     setLayout: (layout) => set({ layout }),
     runLayout: () => set((s) => ({ layoutNonce: s.layoutNonce + 1 })),
     setLabelMode: (labelMode) => set({ labelMode }),
+    /** Ignore identical results: this runs on every edit, drag and layout. */
+    setGroupLayers: (layers) => {
+      const prev = get().groupLayers;
+      const ids = Object.keys(layers);
+      const unchanged =
+        ids.length === Object.keys(prev).length &&
+        ids.every((id) => prev[id]?.order === layers[id].order && prev[id]?.note === layers[id].note);
+      if (!unchanged) set({ groupLayers: layers });
+    },
     setConnectionDefaults: (d) =>
       set((s) => ({ connectionDefaults: { ...s.connectionDefaults, ...d } })),
     setStatus: (status) => {
@@ -604,6 +620,8 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     updateLocation: async (id, patch) => {
+      /* a pending draft can flush after its row is gone (Delete, map switch) */
+      if (!get().locations[id]) return;
       const updated = await guardScoped(() => api.updateLocation(id, patch));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [id]: updated } }));
@@ -720,6 +738,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     updateGroup: async (id, patch) => {
+      if (!get().groups[id]) return;
       const updated = await guardScoped(() => api.updateGroup(id, patch));
       if (!updated) return;
       set((s) => ({ groups: { ...s.groups, [id]: updated } }));
@@ -767,6 +786,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     setGroupParent: async (groupId, parentId) => {
+      if (!get().groups[groupId]) return;
       if (parentId && descendantGroupIds(Object.values(get().groups), groupId).has(parentId)) {
         set({ error: 'A grouping cannot be nested inside itself' });
         return;
@@ -792,6 +812,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     updateLocationLabel: async (id, patch) => {
+      if (!get().locationLabels[id]) return;
       const updated = await guardScoped(() => api.updateLocationLabel(id, patch));
       if (!updated) return;
       set((s) => ({ locationLabels: { ...s.locationLabels, [id]: updated } }));
@@ -885,6 +906,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     updateConnectionLabel: async (id, patch) => {
+      if (!get().connectionLabels[id]) return;
       const updated = await guardScoped(() => api.updateConnectionLabel(id, patch));
       if (!updated) return;
       set((s) => ({ connectionLabels: { ...s.connectionLabels, [id]: updated } }));
@@ -980,6 +1002,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     updateConnection: async (id, patch) => {
+      if (!get().connections[id]) return;
       const updated = await guardScoped(() => api.updateConnection(id, patch));
       if (!updated) return;
       set((s) => ({ connections: { ...s.connections, [id]: updated } }));

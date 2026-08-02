@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import MenuPanel, { type MenuEntry } from './Menu';
+import type { MenuEntry } from './Menu';
+import PickerButton from './PickerButton';
 
 export interface PickableLabel {
   id: string;
@@ -27,9 +27,6 @@ export default function LabelPicker({
   buttonLabel = '+ Add Label',
   disabled
 }: Props) {
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-
   const available = labels
     .filter((l) => !exclude?.has(l.id))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
@@ -40,21 +37,5 @@ export default function LabelPicker({
 
   if (onCreateNew) entries.push({ label: newLabel, onSelect: onCreateNew });
 
-  return (
-    <>
-      <button
-        ref={btnRef}
-        className="picker"
-        disabled={disabled}
-        onClick={() => {
-          const r = btnRef.current?.getBoundingClientRect();
-          if (r) setMenu({ x: r.left, y: r.bottom + 4 });
-        }}
-      >
-        <span className="picker-label">{buttonLabel}</span>
-        <span className="picker-arrow">▾</span>
-      </button>
-      {menu && <MenuPanel x={menu.x} y={menu.y} items={entries} onClose={() => setMenu(null)} />}
-    </>
-  );
+  return <PickerButton label={buttonLabel} entries={entries} disabled={disabled} />;
 }

@@ -9,6 +9,7 @@ import SearchPanel from './components/SearchPanel';
 import SettingsModal from './components/SettingsModal';
 import Toolbar from './components/Toolbar';
 import TripPlanner from './components/TripPlanner';
+import { inspectorCancel } from './components/useDraft';
 import { useGraphStore } from './state/store';
 import { pushEscapeHandler } from './utils/escapeStack';
 
@@ -43,9 +44,16 @@ export default function App() {
       const store = useGraphStore.getState();
 
       if (typing) return;
-      if ((e.key === 'Delete' || e.key === 'Backspace') && store.selection) {
+      if (
+        (e.key === 'Delete' || e.key === 'Backspace') &&
+        (store.selection || store.multiSelect.length > 1)
+      ) {
         e.preventDefault();
-        if (confirm('Delete the current selection?')) void store.deleteSelection();
+        if (confirm('Delete the current selection?')) {
+          /* the rows are about to be gone: don't let the unmount PATCH them */
+          inspectorCancel.current?.();
+          void store.deleteSelection();
+        }
       }
       if (e.key === 'n') store.setMode('add-location');
       if (e.key === 'c') store.setMode('connect');

@@ -9,6 +9,7 @@ import type {
 } from './types';
 
 const iso = (v: Date | string) => (v instanceof Date ? v.toISOString() : String(v));
+const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
 export const mapMap = (r: any): GraphMap => ({
   id: r.id,
@@ -42,17 +43,17 @@ export const mapLocation = (r: any): Location => ({
   groupId: r.group_id ?? null,
   name: r.name,
   kind: r.kind,
+  size: Number(r.size ?? 1),
   layer: r.layer,
   notes: r.notes,
   color: r.color,
   textColor: r.text_color,
   visited: r.visited,
-  pinned: r.pinned,
-  x: r.x === null || r.x === undefined ? null : Number(r.x),
-  y: r.y === null || r.y === undefined ? null : Number(r.y),
-  coordX: r.coord_x === null || r.coord_x === undefined ? null : Number(r.coord_x),
-  coordY: r.coord_y === null || r.coord_y === undefined ? null : Number(r.coord_y),
-  coordZ: r.coord_z === null || r.coord_z === undefined ? null : Number(r.coord_z),
+  x: num(r.x),
+  y: num(r.y),
+  coordX: num(r.coord_x),
+  coordY: num(r.coord_y),
+  coordZ: num(r.coord_z),
   labelIds: (r.label_ids ?? []) as string[],
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)
@@ -74,10 +75,10 @@ export const mapConnection = (r: any): Connection => ({
   locked: r.locked,
   lockNote: r.lock_note,
   weight: Number(r.weight ?? 1),
-  outDx: r.out_dx === null || r.out_dx === undefined ? null : Number(r.out_dx),
-  outDy: r.out_dy === null || r.out_dy === undefined ? null : Number(r.out_dy),
-  inDx: r.in_dx === null || r.in_dx === undefined ? null : Number(r.in_dx),
-  inDy: r.in_dy === null || r.in_dy === undefined ? null : Number(r.in_dy),
+  outDx: num(r.out_dx),
+  outDy: num(r.out_dy),
+  inDx: num(r.in_dx),
+  inDy: num(r.in_dy),
   requires: (r.requires ?? []) as string[],
   labelIds: (r.label_ids ?? []) as string[],
   createdAt: iso(r.created_at),
@@ -91,6 +92,7 @@ export const mapLocationLabel = (r: any): LocationLabel => ({
   color: r.color,
   notes: r.notes,
   defaultKind: r.default_kind,
+  defaultSize: num(r.default_size),
   defaultColor: r.default_color,
   defaultTextColor: r.default_text_color,
   defaultLayer: r.default_layer,
@@ -109,8 +111,7 @@ export const mapConnectionLabel = (r: any): ConnectionLabel => ({
   defaultTextColor: r.default_text_color,
   defaultTravelKind: r.default_travel_kind,
   defaultDirection: r.default_direction,
-  defaultWeight:
-    r.default_weight === null || r.default_weight === undefined ? null : Number(r.default_weight),
+  defaultWeight: num(r.default_weight),
   defaultEphemeral: r.default_ephemeral ?? null,
   defaultLocked: r.default_locked ?? null,
   defaultLockNote: r.default_lock_note,

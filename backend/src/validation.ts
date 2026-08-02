@@ -21,24 +21,18 @@ export const groupCreate = z.object({
   locationIds: z.array(uuid).max(10_000).optional()
 });
 
-export const groupUpdate = z.object({
-  name: z.string().max(200).optional(),
-  color: z.string().max(40).optional(),
-  textColor: z.string().max(40).optional(),
-  notes: z.string().max(100_000).optional(),
-  parentId: uuid.nullable().optional()
-});
+export const groupUpdate = groupCreate.omit({ locationIds: true });
 
 export const locationCreate = z.object({
   name: z.string().max(200).optional(),
   kind: z.string().max(60).optional(),
+  size: z.number().finite().positive().max(25).optional(),
   layer: z.string().max(120).optional(),
   notes: z.string().max(100_000).optional(),
   color: z.string().max(40).optional(),
   textColor: z.string().max(40).optional(),
   groupId: uuid.nullable().optional(),
   visited: z.boolean().optional(),
-  pinned: z.boolean().optional(),
   x: z.number().finite().nullable().optional(),
   y: z.number().finite().nullable().optional(),
   coordX: z.number().int().min(-1_000_000).max(1_000_000).nullable().optional(),
@@ -48,6 +42,7 @@ export const locationCreate = z.object({
 
 export const locationUpdate = locationCreate;
 
+/** Everything a connection carries except its endpoints and unlock conditions. */
 const connectionFields = {
   name: z.string().max(200).optional(),
   notes: z.string().max(100_000).optional(),
@@ -63,19 +58,22 @@ const connectionFields = {
   outDx: z.number().finite().nullable().optional(),
   outDy: z.number().finite().nullable().optional(),
   inDx: z.number().finite().nullable().optional(),
-  inDy: z.number().finite().nullable().optional(),
-  requires: z.array(uuid).max(200).optional()
+  inDy: z.number().finite().nullable().optional()
 };
+
+const requires = z.array(uuid).max(200).optional();
 
 export const connectionCreate = z.object({
   sourceId: uuid,
   targetId: uuid,
+  requires,
   ...connectionFields
 });
 
 export const connectionUpdate = z.object({
   sourceId: uuid.optional(),
   targetId: uuid.optional(),
+  requires,
   ...connectionFields
 });
 
@@ -84,6 +82,7 @@ export const locationLabelCreate = z.object({
   color: z.string().max(40).optional(),
   notes: z.string().max(100_000).optional(),
   defaultKind: z.string().max(60).optional(),
+  defaultSize: z.number().finite().positive().max(25).nullable().optional(),
   defaultColor: z.string().max(40).optional(),
   defaultTextColor: z.string().max(40).optional(),
   defaultLayer: z.string().max(120).optional(),
@@ -116,13 +115,7 @@ export const labelAssign = z.object({
 
 export const positionsUpdate = z.object({
   positions: z
-    .array(
-      z.object({
-        id: uuid,
-        x: z.number().finite(),
-        y: z.number().finite()
-      })
-    )
+    .array(z.object({ id: uuid, x: z.number().finite(), y: z.number().finite() }))
     .max(100_000)
     .optional()
     .default([]),
@@ -141,11 +134,10 @@ export const positionsUpdate = z.object({
     .default([])
 });
 
+/* Array sizes are bounded so one request can't hold a transaction open forever. */
 export const graphImport = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().max(10_000).optional(),
-  /* bounded like the positions endpoint, so one request can't hold a
-     transaction open indefinitely */
   groups: z
     .array(
       z.object({
@@ -170,37 +162,31 @@ export const graphImport = z.object({
     .optional(),
   connectionLabels: z
     .array(
-      connectionLabelCreate
-        .omit({ defaultRequires: true })
-        .extend({
-          key: z.string().min(1).max(200),
-          defaultRequiresKeys: z.array(z.string()).optional()
-        })
+      connectionLabelCreate.omit({ defaultRequires: true }).extend({
+        key: z.string().min(1).max(200),
+        defaultRequiresKeys: z.array(z.string()).optional()
+      })
     )
     .max(5_000)
     .optional(),
   locations: z
     .array(
-      locationCreate
-        .omit({ groupId: true })
-        .extend({
-          key: z.string().min(1).max(200),
-          groupKey: z.string().nullable().optional(),
-          labelKeys: z.array(z.string()).optional()
-        })
+      locationCreate.omit({ groupId: true }).extend({
+        key: z.string().min(1).max(200),
+        groupKey: z.string().nullable().optional(),
+        labelKeys: z.array(z.string()).optional()
+      })
     )
     .max(50_000),
   connections: z
     .array(
-      z
-        .object({
-          sourceKey: z.string().min(1),
-          targetKey: z.string().min(1),
-          requiresKeys: z.array(z.string()).optional(),
-          labelKeys: z.array(z.string()).optional(),
-          ...connectionFields
-        })
-        .omit({ requires: true })
+      z.object({
+        sourceKey: z.string().min(1),
+        targetKey: z.string().min(1),
+        requiresKeys: z.array(z.string()).optional(),
+        labelKeys: z.array(z.string()).optional(),
+        ...connectionFields
+      })
     )
     .max(200_000)
 });

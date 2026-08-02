@@ -2,8 +2,9 @@ import type { Core, NodeSingular } from 'cytoscape';
 import type { Settings } from '../state/settings';
 
 /**
- * The *base* (un-zoomed) box of a node. Layouts must always measure with this,
- * never with `node.width()`, which reflects the zoom-compensated drawn size.
+ * The *base* (un-zoomed) box of a node, including its size scalar. Layouts must
+ * always measure with this, never with `node.width()`, which reflects the
+ * zoom-compensated drawn size.
  */
 export function baseSize(node: NodeSingular) {
   const w = node.data('w');
@@ -30,13 +31,30 @@ export function viewScaleFactor(zoom: number, settings: Settings): number {
 }
 
 const FONT = { location: 12, portal: 10, group: 15, edge: 11 };
+
 /**
  * Cytoscape drops a label once its *rendered* size falls below
- * `min-zoomed-font-size`; 0 disables that entirely.
+ * `min-zoomed-font-size`; 0 disables that entirely. Because a big room's font is
+ * multiplied by its size scalar, its name also survives further zoom-out — which
+ * is exactly what "this place is more important" should mean.
  */
 const MIN_FONT = { location: 6, portal: 6, group: 5, edge: 7 };
 
-/** Write the `…View` twin of every size-like property, pre-multiplied by `f`. */
+/** A location's size scalar; everything else is unscaled. */
+const sizeOf = (data: Record<string, unknown>) => {
+  const s = data.size;
+  return typeof s === 'number' && s > 0 ? s : 1;
+};
+
+/**
+ * Write the `…View` twin of every size-like property, pre-multiplied by `f`.
+ *
+ * `w`/`h` already carry the location's size scalar (the element builder bakes it
+ * into the box), so they only need the zoom factor. Everything that is measured
+ * in *text* units — font, wrap width, text offset, border — is multiplied by
+ * `size × f` instead, so a 2× room gets a 2× box *and* 2× text at any zoom, and
+ * the disparity with its neighbours never washes out.
+ */
 export function applyViewScale(cy: Core, f: number, settings: Settings) {
   const cull = settings.hideSmallLabels;
   cy.batch(() => {
@@ -44,22 +62,23 @@ export function applyViewScale(cy: Core, f: number, settings: Settings) {
       const d = n.data();
       const isGroup = d.kind === 'group';
       const isPortal = d.portalSide !== undefined;
+      const k = sizeOf(d) * f;
 
       if (typeof d.w === 'number') n.data('wView', d.w * f);
       if (typeof d.h === 'number') n.data('hView', d.h * f);
-      if (typeof d.textMaxWidth === 'number') n.data('textMaxWidthView', d.textMaxWidth * f);
-      n.data('textMarginYView', (d.textMarginY ?? 0) * f);
-      n.data(
-        'fontView',
-        (isGroup ? FONT.group : isPortal ? FONT.portal : FONT.location) * f
-      );
+      if (typeof d.textMaxWidth === 'number') n.data('textMaxWidthView', d.textMaxWidth * k);
+      n.data('textMarginYView', (d.textMarginY ?? 0) * k);
+
+      n.data('fontView', (isGroup ? FONT.group : isPortal ? FONT.portal : FONT.location) * k);
       n.data(
         'minFontView',
         cull ? (isGroup ? MIN_FONT.group : isPortal ? MIN_FONT.portal : MIN_FONT.location) : 0
       );
-      n.data('borderView', (isGroup ? 2 : isPortal ? 1.5 : d.hasNotes ? 5 : 2) * f);
-      n.data('borderStrongView', 5 * f);
-      n.data('borderNeighbourView', 4 * f);
+
+      n.data('borderView', (isGroup ? 2 : isPortal ? 1.5 : d.hasNotes ? 5 : 2) * k);
+      n.data('borderStrongView', 5 * k);
+      n.data('borderNeighbourView', 4 * k);
+
       if (isGroup) {
         n.data('paddingView', 30 * f);
         n.data('groupLabelOffsetView', -8 * f);

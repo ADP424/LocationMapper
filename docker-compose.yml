@@ -8,10 +8,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-mapgraph}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mapgraph}
       POSTGRES_DB: ${POSTGRES_DB:-mapgraph}
+    # the schema (and the first-boot demo map) are applied by the backend
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
-      - ./db/seed.sql:/docker-entrypoint-initdb.d/002-seed.sql:ro
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:

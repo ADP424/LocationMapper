@@ -21,6 +21,9 @@ export const PALETTE = {
   groupBorder: '#5d7a9e'
 };
 
+/** Neutral translucency of a grouping box; `groupLayers` ramps around it. */
+export const GROUP_OPACITY = { fill: 0.18, border: 0.75 };
+
 export interface Option {
   value: string;
   label: string;

@@ -6,6 +6,7 @@ import { useGraphStore } from '../state/store';
 export default function GroupPanel() {
   const groups = useGraphStore((s) => s.groups);
   const locations = useGraphStore((s) => s.locations);
+  const groupLayers = useGraphStore((s) => s.groupLayers);
   const selectGroup = useGraphStore((s) => s.selectGroup);
 
   const rows = useMemo(() => {
@@ -23,20 +24,26 @@ export default function GroupPanel() {
     <section className="panel">
       <h2>Groupings</h2>
       <ul className="hit-list">
-        {rows.map(({ group, depth, count }) => (
-          <li key={group.id} style={{ paddingLeft: 10 + depth * 14 }}>
-            <button className="link" onClick={() => focusGroup(group.id, selectGroup)}>
-              <span className="hit-title" style={{ color: group.textColor || undefined }}>
-                <span className="group-dot" style={{ background: group.color || '#8fa7c4' }} />
-                {group.name || 'Unnamed Grouping'}
-              </span>
-              <span className="muted small">
-                {count} {count === 1 ? 'Room' : 'Rooms'}
-                {count === 0 ? ' · Not Drawn Until It Has A Room' : ''}
-              </span>
-            </button>
-          </li>
-        ))}
+        {rows.map(({ group, depth, count }) => {
+          const layer = groupLayers[group.id];
+          return (
+            <li key={group.id} style={{ paddingLeft: 10 + depth * 14 }}>
+              <button className="link" onClick={() => focusGroup(group.id, selectGroup)}>
+                <span className="hit-title" style={{ color: group.textColor || undefined }}>
+                  <span className="group-dot" style={{ background: group.color || '#8fa7c4' }} />
+                  {group.name || 'Unnamed Grouping'}
+                </span>
+                <span className="muted small">
+                  {count} {count === 1 ? 'Room' : 'Rooms'}
+                  {layer
+                    ? ` · Layer ${layer.order}/${layer.total}${layer.note ? ` (${layer.note})` : ''}`
+                    : ''}
+                  {count === 0 ? ' · Not Drawn Until It Has A Room' : ''}
+                </span>
+              </button>
+            </li>
+          );
+        })}
         {rows.length === 0 && (
           <li className="muted small">
             None Yet — Right-Click A Room And Choose "Create Grouping From This Room".

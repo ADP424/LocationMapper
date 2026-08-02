@@ -3,14 +3,16 @@ import elk from 'cytoscape-elk';
 import fcose from 'cytoscape-fcose';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { cyHolder } from '../graph/cyHolder';
-import { buildElements, groupNodeId, isInternalId, parsePortalId } from '../graph/elements';
+import { buildElements, groupNodeId, isInternalId, parsePortalId, portalEdgeId } from '../graph/elements';
 import { computeCoordinateLayout } from '../graph/coordinateLayout';
 import { computeGroupedLayout } from '../graph/groupLayout';
+import { applyGroupLayers, applyRoomLayers, computeGroupLayers } from '../graph/layering';
 import { descendantGroupIds, buildGroupTree } from '../graph/groups';
 import { COORDINATE_LAYOUTS, computeMetrics, isCoordinateLayout, layoutOptions } from '../graph/layouts';
 import type { RoutePlan } from '../graph/pathfinding';
 import { graphStyle } from '../graph/style';
-import { applyViewScale, viewScaleFactor } from '../graph/viewScale';
+import { applyViewScale, baseSize, viewScaleFactor } from '../graph/viewScale';
+import { bindWheelZoom } from '../graph/wheelZoom';
 import { useGraphStore } from '../state/store';
 import type { PortalOffset, Selection } from '../types';
 import GraphScrollbars from './GraphScrollbars';
@@ -25,6 +27,9 @@ const RECONNECT_EDGE = '__reconnect-edge__';
 /** How far outside the room the drag handle floats, so it never overlaps it. */
 const HANDLE_OFFSET = 18;
 
+/** A layout that never reports back must not leave the canvas locked to base scale. */
+const LAYOUT_WATCHDOG_MS = 20_000;
+
 let extensionsRegistered = false;
 function registerExtensions() {
   if (extensionsRegistered) return;
@@ -36,16 +41,6 @@ function registerExtensions() {
 function refreshRendering(cy: Core) {
   cy.style().update();
   cy.forceRender();
-}
-
-/** wheelSensitivity is an init option; the renderer reads it per event. */
-function setWheelSensitivity(cy: Core, value: number) {
-  try {
-    const renderer = (cy as any).renderer?.();
-    if (renderer) renderer.wheelSensitivity = value;
-  } catch {
-    /* private API — ignore if the internals ever move */
-  }
 }
 
 /**
@@ -300,11 +295,26 @@ const renderedToModel = (cy: Core, x: number, y: number) => ({
 
 export default function GraphCanvas() {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  /** Sits above the Cytoscape container, so it can intercept the wheel first. */
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
   const lastMapRef = useRef<string | null>(null);
   const [cyReady, setCyReady] = useState(false);
   const factorRef = useRef(1);
+  /**
+   * Held by the layout currently being solved, so every effect agrees on base
+   * geometry. A token rather than a boolean: a cancelled layout can still emit
+   * `layoutstop` long after its successor has taken the lock, and releasing
+   * someone else's lock leaves the canvas mis-scaled.
+   */
+  const layoutScaleLock = useRef<object | null>(null);
   const settingsRef = useRef(useGraphStore.getState().settings);
+  /**
+   * Which layout produced the arrangement on screen. This is *not* `layout`:
+   * persisting a layout's result flips the picker to "Saved Positions", but a
+   * coordinate arrangement must keep its coordinate-based grouping stack.
+   */
+  const layeringSourceRef = useRef(useGraphStore.getState().layout);
 
   const [marquee, setMarquee] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(
     null
@@ -373,7 +383,7 @@ export default function GraphCanvas() {
 
   /* ---------------------------------------------------------- create once */
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || !wrapperRef.current) return;
     registerExtensions();
 
     const cy = cytoscape({
@@ -383,7 +393,6 @@ export default function GraphCanvas() {
       hideEdgesOnViewport: false,
       textureOnViewport: false,
       motionBlur: false,
-      wheelSensitivity: 0.85,
       minZoom: 0.04,
       maxZoom: 4,
       selectionType: 'single',
@@ -393,7 +402,13 @@ export default function GraphCanvas() {
     cyRef.current = cy;
     cyHolder.cy = cy;
     setCyReady(true);
-    setWheelSensitivity(cy, settingsRef.current.scrollSensitivity);
+
+    /* the app owns wheel zooming — see graph/wheelZoom for why Cytoscape's is
+       bypassed. Sensitivity is read per event, so Settings applies instantly. */
+    const unbindWheel = bindWheelZoom(wrapperRef.current, cy, {
+      sensitivity: () => settingsRef.current.scrollSensitivity,
+      blocked: () => !!cxtStartRef.current?.moved || cy.nodes(':grabbed').nonempty()
+    });
 
     /* keep boxes/labels a constant size on screen while zooming */
     factorRef.current = viewScaleFactor(cy.zoom(), settingsRef.current);
@@ -405,6 +420,8 @@ export default function GraphCanvas() {
       const f = viewScaleFactor(cy.zoom(), settingsRef.current);
       if (Math.abs(f - factorRef.current) / Math.max(factorRef.current, 0.0001) < 0.01) return;
       factorRef.current = f;
+      /* a running layout owns the geometry: it is solved at base scale */
+      if (layoutScaleLock.current) return;
       applyViewScale(cy, f, settingsRef.current);
     };
     const onViewport = () => {
@@ -429,10 +446,7 @@ export default function GraphCanvas() {
       cy.resize();
       if (!fittedOnce && cy.nodes().length) {
         fittedOnce = true;
-        applyViewScale(cy, 1, settingsRef.current);
-        cy.fit(undefined, 60);
-        factorRef.current = viewScaleFactor(cy.zoom(), settingsRef.current);
-        applyViewScale(cy, factorRef.current, settingsRef.current);
+        fitAndRescale(cy, 60);
       }
       cy.forceRender();
     });
@@ -521,6 +535,7 @@ export default function GraphCanvas() {
       const selected = cy.nodes('.location:selected');
       if (node.selected() && selected.length > 1) selected.forEach(save);
       else save(node);
+      restack(cy);
     });
 
     /* ------------------------------------- right-drag marquee selection */
@@ -609,6 +624,7 @@ export default function GraphCanvas() {
 
     return () => {
       ro.disconnect();
+      unbindWheel();
       cy.off('viewport', onViewport);
       if (scaleFrame) cancelAnimationFrame(scaleFrame);
       if (scaleTimer) clearTimeout(scaleTimer);
@@ -624,7 +640,27 @@ export default function GraphCanvas() {
     applyViewScale(cy, 1, settingsRef.current);
     cy.fit(undefined, padding);
     factorRef.current = viewScaleFactor(cy.zoom(), settingsRef.current);
-    applyViewScale(cy, factorRef.current, settingsRef.current);
+    /* a layout may be mid-solve: it re-applies the factor when it releases */
+    applyViewScale(cy, currentScale(), settingsRef.current);
+  };
+
+  /** The scale every other effect should write: 1 while a layout is running. */
+  const currentScale = () => (layoutScaleLock.current ? 1 : factorRef.current);
+
+  /**
+   * Recompute the grouping stack and push it onto the graph, synchronously —
+   * called right after positions are written so there is no round-trip through
+   * the server before the stack (and the sidebar's "Layer N/M" readout) catch up.
+   */
+  const restack = (cy: Core) => {
+    const { groups, locations } = useGraphStore.getState();
+    const plane = isCoordinateLayout(layeringSourceRef.current)
+      ? COORDINATE_LAYOUTS[layeringSourceRef.current]
+      : null;
+    const layers = computeGroupLayers(cy, Object.values(groups), Object.values(locations), plane);
+    applyGroupLayers(cy, layers);
+    applyRoomLayers(cy, locations, plane);
+    useGraphStore.getState().setGroupLayers(layers);
   };
 
   /* ------------------------------------------------- settings -> canvas */
@@ -632,9 +668,8 @@ export default function GraphCanvas() {
     settingsRef.current = settings;
     const cy = cyRef.current;
     if (!cy) return;
-    setWheelSensitivity(cy, settings.scrollSensitivity);
     factorRef.current = viewScaleFactor(cy.zoom(), settings);
-    applyViewScale(cy, factorRef.current, settings);
+    applyViewScale(cy, currentScale(), settings);
     refreshRendering(cy);
   }, [settings]);
 
@@ -652,8 +687,10 @@ export default function GraphCanvas() {
     };
 
     const structural = syncGraph(cy, elements, fullReset, centre);
+    /* groupings are drawn bottom-most; their order follows the rooms */
+    restack(cy);
     /* new/changed elements need their zoom-compensated sizes */
-    applyViewScale(cy, factorRef.current, settingsRef.current);
+    applyViewScale(cy, currentScale(), settingsRef.current);
     applyHighlight(cy, selection, multiSelect, labelMembers, routePlan, waypoints);
     if (structural) refreshRendering(cy);
 
@@ -672,10 +709,15 @@ export default function GraphCanvas() {
     const cy = cyRef.current;
     if (!cy || cy.nodes().length === 0) return;
     let cancelled = false;
+    layeringSourceRef.current = layout;
 
     const metrics = computeMetrics(
       cy.edges().map((e) => (e.data('labelWidth') as number) ?? 0),
-      cy.nodes().length
+      /* base boxes, so every location's size scalar reaches the engines */
+      cy.nodes('.location, .portal').map((n) => {
+        const b = baseSize(n);
+        return Math.max(b.w, b.h);
+      })
     );
 
     /* stub boxes are persisted too, so a layout keeps them where it put them */
@@ -699,6 +741,7 @@ export default function GraphCanvas() {
     };
 
     if (layout === 'preset') {
+      restack(cy);
       fitAndRescale(cy, 60);
       refreshRendering(cy);
       return;
@@ -721,6 +764,7 @@ export default function GraphCanvas() {
         });
       });
       rebaseStubOffsets(cy);
+      restack(cy); // off-plane coordinate order
       fitAndRescale(cy, 70);
       refreshRendering(cy);
 
@@ -745,10 +789,35 @@ export default function GraphCanvas() {
     const hasGroups = cy.nodes('.group').nonempty();
 
     if (!hasGroups) {
+      /* Solve against base geometry: the arrangement must depend on the rooms'
+         own sizes, never on the current zoom compensation (which would other-
+         wise inflate every box and make each re-layout drift larger). */
+      const token = {};
+      let watchdog: ReturnType<typeof setTimeout> | null = null;
+      const release = () => {
+        if (watchdog) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
+        /* only the run that took the lock may hand it back: a cancelled layout
+           can still emit `layoutstop` after its successor has taken it */
+        if (layoutScaleLock.current !== token) return;
+        layoutScaleLock.current = null;
+        applyViewScale(cy, factorRef.current, settingsRef.current);
+      };
+      layoutScaleLock.current = token;
+      applyViewScale(cy, 1, settingsRef.current);
+      /* …and a layout that never reports back must not freeze the compensation,
+         which looks exactly like the wheel suddenly got more sensitive */
+      watchdog = setTimeout(release, LAYOUT_WATCHDOG_MS);
+
       const run = cy.layout(layoutOptions(layout, metrics));
       run.one('layoutstop', () => {
+        release();
         if (cancelled) return;
         rebaseStubOffsets(cy);
+        restack(cy); // areas are final now that every room has landed
+        fitAndRescale(cy, 60);
         refreshRendering(cy);
         const snap = snapshot();
         void useGraphStore.getState().persistLayoutPositions(snap.positions, snap.portalOffsets);
@@ -757,11 +826,12 @@ export default function GraphCanvas() {
       return () => {
         cancelled = true;
         run.stop();
+        release();
       };
     }
 
     (async () => {
-      const positions = await computeGroupedLayout(cy, layout, metrics);
+      const positions = await computeGroupedLayout(cy, layout);
       if (cancelled || !positions.size) return;
       cy.batch(() => {
         positions.forEach((p, id) => {
@@ -769,6 +839,7 @@ export default function GraphCanvas() {
           if (n.nonempty() && !n.hasClass('group')) n.position(p);
         });
       });
+      restack(cy); // areas are final now that every room has landed
       fitAndRescale(cy, 70);
       rebaseStubOffsets(cy);
       refreshRendering(cy);
@@ -817,7 +888,7 @@ export default function GraphCanvas() {
         classes: 'ghost-edge'
       }
     ]);
-    applyViewScale(cy, factorRef.current, settingsRef.current);
+    applyViewScale(cy, currentScale(), settingsRef.current);
 
     const onMove = (ev: any) => {
       const ghost = cy.getElementById(GHOST_NODE);
@@ -849,8 +920,8 @@ export default function GraphCanvas() {
     const conn = connections[selection.id];
     if (!conn) return;
 
-    const srcEdge = cy.getElementById(conn.ephemeral ? `${conn.id}::out-edge` : conn.id);
-    const tgtEdge = cy.getElementById(conn.ephemeral ? `${conn.id}::in-edge` : conn.id);
+    const srcEdge = cy.getElementById(conn.ephemeral ? portalEdgeId(conn.id, 'out') : conn.id);
+    const tgtEdge = cy.getElementById(conn.ephemeral ? portalEdgeId(conn.id, 'in') : conn.id);
     const srcNode = cy.getElementById(conn.sourceId);
     const tgtNode = cy.getElementById(conn.targetId);
     if (srcEdge.empty() || tgtEdge.empty() || srcNode.empty() || tgtNode.empty()) return;
@@ -891,7 +962,7 @@ export default function GraphCanvas() {
         grabbable: true
       }
     ]);
-    applyViewScale(cy, factorRef.current, settingsRef.current);
+    applyViewScale(cy, currentScale(), settingsRef.current);
 
     /* the cursor is a far better drop probe than the handle's centre */
     const resolveDrop = (handle: any): NodeSingular | null => {
@@ -928,7 +999,7 @@ export default function GraphCanvas() {
         classes: 'reconnect-edge',
         selectable: false
       });
-      applyViewScale(cy, factorRef.current, settingsRef.current);
+      applyViewScale(cy, currentScale(), settingsRef.current);
     };
 
     const onDrag = (ev: any) => {
@@ -1026,6 +1097,10 @@ export default function GraphCanvas() {
           label: `+ Create Room Inside "${name}"`,
           onSelect: () => void store.createLocationAt(contextMenu.graphX, contextMenu.graphY, id)
         },
+        {
+          label: `+ Create Room Outside "${name}"`,
+          onSelect: () => void store.createLocationAt(contextMenu.graphX, contextMenu.graphY, null)
+        },
         { label: 'Inspect Grouping', onSelect: () => store.selectGroup(id) },
         {
           kind: 'submenu',
@@ -1113,7 +1188,11 @@ export default function GraphCanvas() {
   const closeMenu = useGraphStore((s) => s.closeContextMenu);
 
   return (
-    <div className={`graph-canvas mode-${mode}`} onContextMenu={(e) => e.preventDefault()}>
+    <div
+      ref={wrapperRef}
+      className={`graph-canvas mode-${mode}`}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <div ref={containerRef} className="cy-host" />
       {cyReady && <GraphScrollbars />}
 

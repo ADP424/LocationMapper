@@ -1,8 +1,8 @@
 import cytoscape, { Core, ElementDefinition } from 'cytoscape';
-import { LayoutMetrics, LayoutName, layoutOptions } from './layouts';
+import { LayoutName, computeMetrics, layoutOptions } from './layouts';
 import { baseSize } from './viewScale';
 
-export const GROUP_PADDING = 34;
+const GROUP_PADDING = 34;
 /** Extra headroom inside a grouping for its title. */
 const LABEL_ROOM = 20;
 
@@ -34,8 +34,7 @@ function runLayoutAsync(cy: Core, options: any, timeoutMs = 20_000): Promise<voi
 
 async function layoutHeadless(
   elements: ElementDefinition[],
-  name: LayoutName,
-  metrics: LayoutMetrics
+  name: LayoutName
 ): Promise<Map<string, Pos>> {
   const positions = new Map<string, Pos>();
   const nodes = elements.filter((el) => !el.data?.source);
@@ -59,16 +58,23 @@ async function layoutHeadless(
   });
 
   try {
+    /* measure this container's own geometry: a sub-grouping enters its parent's
+       layout as one big node, and over-sized rooms carry their size scalar in
+       w/h, so both need the spacing terms computed here rather than globally */
+    const metrics = computeMetrics(
+      cy.edges().map((e) => (e.data('labelWidth') as number) ?? 0),
+      cy.nodes().map((n) => Math.max(Number(n.data('w')) || 0, Number(n.data('h')) || 0))
+    );
+
     await runLayoutAsync(cy, {
-      ...layoutOptions(name === 'preset' ? 'fcose' : name, {
-        ...metrics,
-        nodeCount: cy.nodes().length
-      }),
+      ...layoutOptions(name === 'preset' ? 'fcose' : name, metrics),
       animate: false,
       fit: false,
       nodeDimensionsIncludeLabels: false
     });
-    cy.nodes().forEach((n) => { positions.set(n.id(), { ...n.position() }); });
+    cy.nodes().forEach((n) => {
+      positions.set(n.id(), { ...n.position() });
+    });
   } finally {
     cy.destroy();
   }
@@ -111,21 +117,17 @@ const ROOT = '__root__';
  * Connections always stay room-to-room, and nothing outside a box can be
  * placed inside it — at any nesting depth.
  */
-export async function computeGroupedLayout(
-  cy: Core,
-  name: LayoutName,
-  metrics: LayoutMetrics
-): Promise<Map<string, Pos>> {
+export async function computeGroupedLayout(cy: Core, name: LayoutName): Promise<Map<string, Pos>> {
   const realNodes = cy
     .nodes()
     .filter((n) => !n.hasClass('group') && !n.hasClass('ghost') && !n.hasClass('handle'));
   if (!realNodes.length) return new Map();
 
   const groupNodes = cy.nodes('.group');
-  const edges = cy
-    .edges()
-    .filter((e) => !e.hasClass('ghost-edge') && !e.hasClass('reconnect-edge'));
+  const edges = cy.edges().filter((e) => !e.hasClass('ghost-edge') && !e.hasClass('reconnect-edge'));
 
+  /* baseSize() carries each location's size scalar, so a 3x room really is
+     solved as a 3x box at every level of nesting */
   const size = new Map<string, Size>();
   realNodes.forEach((n) => {
     const b = baseSize(n);
@@ -185,7 +187,6 @@ export async function computeGroupedLayout(
   const layoutContainer = async (level: string | null): Promise<void> => {
     const groups = childGroups.get(level) ?? [];
     const nodes = childNodes.get(level) ?? [];
-
     for (const gid of groups) await layoutContainer(gid);
 
     const unitSize = new Map<string, Size>();
@@ -219,7 +220,7 @@ export async function computeGroupedLayout(
       els.push({ data: { id: `m${i++}`, source: `u:${su}`, target: `u:${tu}`, labelWidth } });
     });
 
-    const placed = await layoutHeadless(els, name, metrics);
+    const placed = await layoutHeadless(els, name);
     const box = bboxOf([...unitSize.keys()], placed, unitSize);
 
     const offsets = new Map<string, Pos>();

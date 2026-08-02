@@ -25,8 +25,10 @@ docker compose up --build
 * API — http://localhost:4000/api/health
 * Postgres — localhost:2345 (`mapgraph`/`mapgraph`)
 
-A demo map is seeded on first boot. Schema migrations run automatically on backend
-start and are idempotent, so upgrading is just `docker compose up --build`.
+The schema lives in exactly one place — `backend/src/schema.ts` — and is applied
+(idempotently) when the backend starts. If the database is brand new, the backend
+also seeds a small demo map. There is no migration system: recreating the `pgdata`
+volume recreates the database from that one file.
 
 ### Local development
 
@@ -40,14 +42,18 @@ cd frontend && npm install && npm run dev     # http://localhost:5173, /api prox
 
 ## Concepts
 
-**Location** — a place. Has a name, notes, a shape, box/text colours, a free-form
-*layer* string, optional integer **coordinates** `(X, Y, Z)`, a *visited* flag, saved
-canvas position, any number of **labels**, and at most one **grouping**.
+**Location** — a place. Has a name, notes, a shape, a **size** (a positive scalar on
+the box: `2` is twice as wide and tall as a normal room, `0.5` half — the box, its
+name, and its border all scale together, so the disparity with its neighbours holds
+at every zoom level), box/text colours, a free-form *layer* string, optional integer
+**coordinates** `(X, Y, Z)`, a *visited* flag, saved canvas position, any number of
+**labels**, and at most one **grouping**.
 
 **Connection** — a way between two locations. Arrowheads are set independently per
 end: `A → B`, `A ← B`, `A ⇄ B`, or **no arrowheads at all**, which means *undirected*
 — drawn plain, and walkable both ways by the trip planner. Also carries a name,
 notes, line colour/text colour, line style (`Default` lets the app choose),
+(new connections start as `Default`),
 a logarithmically-drawn **weight**, plus two special modes:
 
 * **Ephemeral** — instead of one long line, draws two detached stubs (`⇄ To X` /
@@ -59,10 +65,21 @@ a logarithmically-drawn **weight**, plus two special modes:
 **Grouping** — a translucent rounded box behind a set of locations, with its own name,
 body colour and (independently settable) title colour. Groupings nest arbitrarily
 deep; cycles are rejected by the API and enforced by a database trigger.
+Overlapping groupings are **stacked**: on a coordinate layout they are ordered along
+the axis that plane does not show (X/Y → by Z, lowest underneath), and on every other
+layout by the area each box covers once positioning finishes, largest underneath. A
+sub-grouping always draws over its parent. The higher a box sits the more solid it is
+drawn, and the sidebar spells the order out as `Layer 3/5 (Z 2)`.
+
+**Draw order** follows the same rule one level down: rooms are stacked by their
+off-plane coordinate on a coordinate layout, and biggest-box-first everywhere else, so
+a large room never buries a small one it overlaps. Rooms are opaque, so the occlusion
+*is* the cue — no ramp. Every room draws over every grouping box, and an ephemeral
+stub shares its anchor room's layer.
 
 **Label** — a reusable category that *stamps* opt-in defaults onto whatever it is
 applied to. Location labels can set shape, box colour, text colour, layer and
-grouping; connection labels can set line/text colour, direction, line style, weight,
+size, grouping; connection labels can set line/text colour, direction, line style, weight,
 ephemeral state and the whole lock condition. Applying a label writes those defaults
 immediately, so the **last label applied wins**, and every chip keeps an **Apply**
 button to re-stamp on demand. Blank/"No Override" fields are never applied.
@@ -76,9 +93,10 @@ button to re-stamp on demand. Blank/"No Override" fields are never applied.
 | New location | **+ Location** then click the canvas, or right-click → **+ Create Room** |
 | New connection | **+ Connection** (source then target), or right-click a room → **+ Create Connection** and drag |
 | Re-attach an end | Select a connection, drag either amber handle onto another room |
-| Inspect / edit | Click anything. Edits apply on **Apply** or when you click outside the panel |
+| Inspect / edit | Click anything. Edits apply on **Apply** or when you click outside the panel. Controls that act immediately (labels, grouping, visited) never discard what you have typed — only **Revert** does |
+| Resize a room | Inspector → **Size** (or **Change Size** when several are selected) |
 | Multi-select | **Right-drag** empty space to marquee rooms (groupings are never caught); drag any one to move them all; the inspector mass-edits shape, grouping, colours and visited |
-| Groupings | Right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside, move it into another grouping, ungroup, delete |
+| Groupings | Right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, ungroup, delete |
 | Labels | Sidebar → **Labels**; add chips from a location's or connection's inspector |
 | Mark visited | Double-click a room, or the inspector checkbox. **Reset All Visited** in the Trip Planner clears them all |
 | Search | Sidebar search with Notes / Locations / Connections toggles and a **Filter By Label** |
@@ -94,6 +112,13 @@ Automatic layouts are **edge-label aware**: connection names are measured with c
 text metrics and fed into the engines (per-edge ideal lengths for fCoSE, inter-layer
 spacing for ELK, spacing factors elsewhere) so names never get crushed.
 
+They are also **size aware**: every engine is handed each room's real box — size
+scalar included — and the spacing terms grow with the largest rooms (fCoSE's ideal
+edge length grows with its own two endpoints, the coordinate grid's cell unit with
+the boxes that eat into the line a name sits on), so over-sized rooms never crowd
+their neighbours or their connection names. Maps that leave every size at `1` lay
+out exactly as before.
+
 Groupings are laid out **recursively**: each grouping (and sub-grouping) is solved as
 its own quotient graph innermost-first, then placed by its parent as a single sized
 node, so nothing outside a box can land inside it at any depth, while connections
@@ -104,6 +129,8 @@ first axis horizontal, second vertical, larger values upward. Rooms sharing a
 coordinate cluster inside their cell; rooms with no coordinate for that plane are
 placed by connectivity. Coordinate layouts honour your coordinates exactly and
 therefore do *not* enforce grouping containment.
+The third axis is not discarded: it becomes the grouping **stacking order**, so an
+X/Y plane layers its groupings by Z.
 
 ### Trip planner
 
@@ -232,21 +259,40 @@ are `CHECK`-constrained positive.
   Cytoscape cannot re-point an existing edge.
 * **Zoom-independent sizing**: every size-like property has a pre-multiplied `…View`
   twin recomputed on zoom (`zoom^-strength`), so boxes and names stay readable at any
-  distance. Layouts read the *base* sizes so the arrangement is zoom-invariant.
+  distance. A location's size scalar is baked into its *base* box and multiplied into
+  the text-side properties alongside the zoom factor, so the two never interfere.
+  Every layout is solved against base geometry — automatic layouts temporarily pin
+  the compensation to 1 — so the arrangement is zoom-invariant and re-layouts never
+  drift larger.
 * Drag positions and ephemeral stub offsets are debounced and written in one
   `UPDATE … FROM unnest(...)`; pending writes are flushed before switching maps.
+* **Wheel zooming is ours, not Cytoscape's.** The library only accepts a
+  sensitivity at construction; setting it afterwards means writing to a private
+  renderer field that is re-seeded from that option and cannot be read back, so
+  the setting silently reverted to the library default depending on startup
+  ordering — zooming would occasionally be much faster than configured. The wheel
+  is intercepted in the capture phase above the canvas (so Cytoscape's handler
+  never runs), `deltaMode` is normalised so mice, trackpads and Firefox agree, and
+  a single huge delta is clamped. Touch gestures are untouched: pinch zoom works.
+* Automatic layouts pin the zoom compensation to 1 while they solve. The lock is
+  held by token — a cancelled layout cannot release its successor's — and has a
+  watchdog, because a frozen compensation is indistinguishable from the wheel
+  becoming four times more sensitive.
 * Route planning runs off the main thread and yields to the event loop so it can be
   cancelled mid-search.
 
 ## Known gaps / decisions
 
-* `locations.pinned` is persisted and styles a gold border, but nothing in the UI
-  toggles it and no layout honours it. Either wire it to fCoSE's
-  `fixedNodeConstraint` (and add a toggle) or drop the column — currently it is inert.
 * A location's **grouping** picker and the **visited** checkbox apply immediately
   rather than through Apply/Revert, because both trigger a re-layout that cannot be
   meaningfully undone by reverting a text field. A grouping's own *parent* picker and
-  a label's default-grouping picker do go through the draft.
+  a label's default-grouping picker do go through the draft. Rows that come back from
+  an immediate action are *merged* into the open draft — fields you have touched are
+  kept, everything else follows the server — so applying a label never discards
+  unsaved edits. If you edited a field **and** then applied a label that sets it, your
+  value wins and is written on click-out; press **Revert** to take the label's instead.
+* A label's *Re-Apply Styling To All…* button commits the open draft first, so it
+  always stamps the defaults you can see rather than the ones last saved.
 * Import performs one insert per row inside a single transaction (one pooled
   connection). Array sizes are capped; batching into multi-row inserts would be the
   next optimisation for very large files.
@@ -255,3 +301,10 @@ are `CHECK`-constrained positive.
   local-only tool; if this API is ever exposed beyond localhost, both need addressing.
 * There is no test suite in this repository. Validate changes with `npm run
   typecheck` (and `npm run build`) in each package.
+* The schema has no migration path, by design. Adding a column means recreating the
+  database: export your maps, `docker compose down -v`, `docker compose up --build`,
+  then import (import fills in anything an older export is missing, e.g. `size: 1`).
+* Zoom-independent sizing inflates boxes in *model* space as you zoom out, while
+  layouts are solved against base geometry, so at extreme zoom-out the compensated
+  boxes can visually crowd an otherwise overlap-free arrangement. Lower the
+  compensation strength in Settings if that bothers you.

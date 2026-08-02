@@ -1,5 +1,19 @@
 import { PALETTE } from './model';
 
+/**
+ * Rooms and groupings carry a computed `zLayer` (1..N, see graph/layering), so
+ * the interaction states have to outrank any conceivable N — a 2 000-room map
+ * would otherwise draw ordinary rooms over their own highlight.
+ */
+const Z = {
+  neighbour: 1_000_000,
+  primary: 1_100_000,
+  route: 1_200_000,
+  ghost: 1_250_000,
+  dropTarget: 1_300_000,
+  handle: 1_400_000
+};
+
 /** Ordering matters: Cytoscape resolves conflicts by *last matching rule*. */
 export const graphStyle: any[] = [
   /* -------------------------------------------------------- groupings */
@@ -8,10 +22,13 @@ export const graphStyle: any[] = [
     style: {
       shape: 'round-rectangle',
       'background-color': 'data(fill)',
-      'background-opacity': 0.18,
+      'background-opacity': 'data(groupFillOpacity)',
       'border-color': 'data(border)',
       'border-width': 'data(borderView)',
-      'border-opacity': 0.75,
+      'border-opacity': 'data(groupBorderOpacity)',
+      /* stacking order among groupings; `z-compound-depth: bottom` keeps the
+         whole band under every room, so this only orders the boxes */
+      'z-index': 'data(zLayer)',
       padding: 'data(paddingView)',
       label: 'data(label)',
       color: 'data(textColor)',
@@ -37,6 +54,8 @@ export const graphStyle: any[] = [
       'background-color': 'data(fill)',
       'border-color': 'data(border)',
       'border-width': 'data(borderView)',
+      /* draw order: off-plane coordinate, or biggest box first */
+      'z-index': 'data(zLayer)',
       label: 'data(label)',
       color: 'data(textColor)',
       'text-wrap': 'wrap',
@@ -52,7 +71,6 @@ export const graphStyle: any[] = [
     }
   },
   { selector: 'node.location.has-notes', style: { 'border-style': 'double' } },
-  { selector: 'node.location.pinned', style: { 'border-color': '#b7791f' } },
 
   /* -------------------------------------------------- ephemeral stubs */
   {
@@ -66,6 +84,8 @@ export const graphStyle: any[] = [
       'border-width': 'data(borderView)',
       'border-style': 'dashed',
       'border-color': 'data(lineColor)',
+      /* a stub shares its anchor room's layer */
+      'z-index': 'data(zLayer)',
       label: 'data(label)',
       color: 'data(lineColor)',
       'font-size': 'data(fontView)',
@@ -118,7 +138,10 @@ export const graphStyle: any[] = [
       'overlay-padding': 5
     }
   },
-  { selector: 'node.group:selected', style: { 'overlay-opacity': 0, 'border-width': 'data(borderNeighbourView)' } },
+  {
+    selector: 'node.group:selected',
+    style: { 'overlay-opacity': 0, 'border-width': 'data(borderNeighbourView)' }
+  },
 
   /* ------------------------------------------------------- planned trip */
   {
@@ -126,7 +149,7 @@ export const graphStyle: any[] = [
     style: {
       'border-color': PALETTE.route,
       'border-width': 'data(borderStrongView)',
-      'z-index': 1100
+      'z-index': Z.route
     }
   },
   {
@@ -136,7 +159,7 @@ export const graphStyle: any[] = [
       'target-arrow-color': PALETTE.route,
       'source-arrow-color': PALETTE.route,
       width: 'data(lineWidthHlView)',
-      'z-index': 1100
+      'z-index': Z.route
     }
   },
   { selector: 'node.route-stop', style: { 'border-color': PALETTE.routeStop, 'border-style': 'double' } },
@@ -145,7 +168,11 @@ export const graphStyle: any[] = [
 
   {
     selector: 'node.hl-neighbor',
-    style: { 'border-color': PALETTE.neighbour, 'border-width': 'data(borderNeighbourView)', 'z-index': 900 }
+    style: {
+      'border-color': PALETTE.neighbour,
+      'border-width': 'data(borderNeighbourView)',
+      'z-index': Z.neighbour
+    }
   },
   {
     selector: 'edge.hl-neighbor',
@@ -153,7 +180,7 @@ export const graphStyle: any[] = [
       'line-color': PALETTE.neighbour,
       'target-arrow-color': PALETTE.neighbour,
       'source-arrow-color': PALETTE.neighbour,
-      'z-index': 900
+      'z-index': Z.neighbour
     }
   },
   {
@@ -162,7 +189,7 @@ export const graphStyle: any[] = [
       'border-color': PALETTE.highlight,
       'border-width': 'data(borderStrongView)',
       'border-style': 'solid',
-      'z-index': 999
+      'z-index': Z.primary
     }
   },
   {
@@ -176,7 +203,7 @@ export const graphStyle: any[] = [
       'target-arrow-color': PALETTE.highlight,
       'source-arrow-color': PALETTE.highlight,
       width: 'data(lineWidthHlView)',
-      'z-index': 999
+      'z-index': Z.primary
     }
   },
   {
@@ -187,6 +214,7 @@ export const graphStyle: any[] = [
       'border-style': 'double'
     }
   },
+
   { selector: '.faded', style: { opacity: 0.18, 'text-opacity': 0.12 } },
   { selector: 'node.group.faded', style: { opacity: 0.35 } },
 
@@ -197,6 +225,8 @@ export const graphStyle: any[] = [
       width: 'data(wView)',
       height: 'data(hView)',
       'background-color': PALETTE.highlight,
+      /* the rubber band's far end must stay visible over the rooms it crosses */
+      'z-index': Z.ghost,
       events: 'no',
       label: ''
     }
@@ -225,7 +255,7 @@ export const graphStyle: any[] = [
       'border-width': 'data(borderView)',
       'border-color': '#ffffff',
       'overlay-opacity': 0,
-      'z-index': 1500,
+      'z-index': Z.handle,
       /* rooms inside a grouping are compound children and would otherwise be
          hit-tested above an orphan node no matter what z-index it has */
       'z-compound-depth': 'top'
@@ -247,6 +277,10 @@ export const graphStyle: any[] = [
   },
   {
     selector: 'node.drop-target',
-    style: { 'border-color': PALETTE.highlight, 'border-width': 'data(borderStrongView)', 'z-index': 1200 }
+    style: {
+      'border-color': PALETTE.highlight,
+      'border-width': 'data(borderStrongView)',
+      'z-index': Z.dropTarget
+    }
   }
 ];

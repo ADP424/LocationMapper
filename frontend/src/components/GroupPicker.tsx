@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react';
 import { buildGroupTree, groupPathLabel, type GroupTreeNode } from '../graph/groups';
 import type { Group } from '../types';
-import MenuPanel, { type MenuEntry } from './Menu';
+import type { MenuEntry } from './Menu';
+import PickerButton from './PickerButton';
 
 export const KEEP = '__keep__';
 
@@ -17,6 +17,7 @@ export function groupMenuEntries(
     if (exclude?.has(node.group.id)) continue;
     const label = node.group.name || 'Unnamed Grouping';
     const children = groupMenuEntries(node.children, onPick, exclude, currentId);
+
     if (!children.length) {
       out.push({ label, onSelect: () => onPick(node.group.id), active: currentId === node.group.id });
     } else {
@@ -60,10 +61,8 @@ export default function GroupPicker({
   onCreateNew,
   disabled
 }: Props) {
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-
   const byId = Object.fromEntries(groups.map((g) => [g.id, g])) as Record<string, Group>;
+
   const label =
     value === KEEP
       ? keepLabel ?? 'Keep Current'
@@ -71,14 +70,10 @@ export default function GroupPicker({
         ? groupPathLabel(byId, value)
         : noneLabel;
 
-  const open = () => {
-    const r = btnRef.current?.getBoundingClientRect();
-    if (r) setMenu({ x: r.left, y: r.bottom + 4 });
-  };
-
   const entries: MenuEntry[] = [];
   if (keepLabel) entries.push({ label: keepLabel, onSelect: () => onKeep?.(), active: value === KEEP });
   entries.push({ label: noneLabel, onSelect: () => onPick(null), active: value === null });
+
   const tree = groupMenuEntries(
     buildGroupTree(groups),
     (id) => onPick(id),
@@ -91,15 +86,5 @@ export default function GroupPicker({
   }
   if (newLabel && onCreateNew) entries.push({ label: newLabel, onSelect: onCreateNew });
 
-  return (
-    <>
-      <button ref={btnRef} className="picker" disabled={disabled} onClick={open}>
-        <span className="picker-label">{label}</span>
-        <span className="picker-arrow">▾</span>
-      </button>
-      {menu && (
-        <MenuPanel x={menu.x} y={menu.y} items={entries} onClose={() => setMenu(null)} />
-      )}
-    </>
-  );
+  return <PickerButton label={label} entries={entries} disabled={disabled} />;
 }

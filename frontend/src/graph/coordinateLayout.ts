@@ -65,8 +65,14 @@ export interface CoordinateLayoutResult {
   seeded: number;
 }
 
-const axisValue = (c: LocationCoords, axis: Axis) =>
+export const coordValue = (c: LocationCoords, axis: Axis) =>
   axis === 'x' ? c.coordX : axis === 'y' ? c.coordY : c.coordZ;
+
+const ALL_AXES: Axis[] = ['x', 'y', 'z'];
+
+/** The axis a plane does *not* show — the one groupings are stacked along. */
+export const offPlaneAxis = (plane: CoordinatePlane): Axis =>
+  ALL_AXES.find((a) => a !== PLANE_AXES[plane].h && a !== PLANE_AXES[plane].v)!;
 
 export function formatCoordinates(c: LocationCoords): string {
   if (c.coordX === null && c.coordY === null && c.coordZ === null) return '';
@@ -215,8 +221,8 @@ export function computeCoordinateLayout(
 
   nodes.forEach((n) => {
     const c = graph.locations[n.id()];
-    const h = c ? axisValue(c, axes.h) : null;
-    const v = c ? axisValue(c, axes.v) : null;
+    const h = c ? coordValue(c, axes.h) : null;
+    const v = c ? coordValue(c, axes.v) : null;
     if (h === null || h === undefined || v === null || v === undefined) {
       freeIds.push(n.id());
       return;
@@ -298,7 +304,11 @@ export function computeCoordinateLayout(
     if (!a || !b) return;
     const dist = Math.hypot(b.h - a.h, b.v - a.v);
     if (dist === 0) return;
-    unit = Math.max(unit, (labelWidth + EDGE_LABEL_PAD) / dist);
+    /* the two boxes eat into the line the name has to sit on, so over-sized
+       rooms need proportionally more grid between them */
+    const clearance =
+      ((size.get(e.source().id())?.w ?? 0) + (size.get(e.target().id())?.w ?? 0)) / 2;
+    unit = Math.max(unit, (labelWidth + EDGE_LABEL_PAD + clearance) / dist);
   });
 
   unit = Math.ceil(unit / 2) * 2;

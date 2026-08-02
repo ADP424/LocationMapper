@@ -3,7 +3,8 @@ import express, { NextFunction, Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { pool, waitForDatabase } from './db';
 import { HttpError, ah, pgErrorResponse } from './http';
-import { migrate } from './migrations';
+import { ensureSchema } from './schema';
+import { seedDemoMap } from './seed';
 import { connectionsRouter } from './routes/connections';
 import { groupsRouter } from './routes/groups';
 import { labelsRouter } from './routes/labels';
@@ -14,7 +15,8 @@ const PORT = Number(process.env.PORT ?? 4000);
 
 async function main() {
   await waitForDatabase();
-  await migrate();
+  /* the schema is idempotent; a brand-new database also gets the demo map */
+  if (await ensureSchema()) await seedDemoMap();
 
   const app = express();
   app.disable('x-powered-by');

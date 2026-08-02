@@ -43,39 +43,68 @@ export const COORDINATE_LAYOUTS: Record<string, CoordinatePlane> = {
 
 export const isCoordinateLayout = (name: LayoutName) => name in COORDINATE_LAYOUTS;
 
-/** Summary of how much room the edge labels need. */
+/** How much room the edge labels and the node boxes need. */
 export interface LayoutMetrics {
   nodeCount: number;
-  maxEdgeLabelWidth: number;
   avgEdgeLabelWidth: number;
   p90EdgeLabelWidth: number;
+  /** Node extents in *base* units, so per-location size scalars are included. */
+  avgNodeSpan: number;
+  p90NodeSpan: number;
 }
 
-export function computeMetrics(labelWidths: number[], nodeCount: number): LayoutMetrics {
+const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+const percentile = (sorted: number[], p: number) =>
+  sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : 0;
+
+export function computeMetrics(labelWidths: number[], nodeSpans: number[]): LayoutMetrics {
   const widths = labelWidths.filter((w) => w > 0).sort((a, b) => a - b);
-  if (!widths.length) {
-    return { nodeCount, maxEdgeLabelWidth: 0, avgEdgeLabelWidth: 0, p90EdgeLabelWidth: 0 };
-  }
-  const sum = widths.reduce((a, b) => a + b, 0);
+  const spans = nodeSpans.filter((s) => s > 0).sort((a, b) => a - b);
   return {
-    nodeCount,
-    maxEdgeLabelWidth: widths[widths.length - 1],
-    avgEdgeLabelWidth: sum / widths.length,
-    p90EdgeLabelWidth: widths[Math.min(widths.length - 1, Math.floor(widths.length * 0.9))]
+    nodeCount: nodeSpans.length,
+    avgEdgeLabelWidth: mean(widths),
+    p90EdgeLabelWidth: percentile(widths, 0.9),
+    avgNodeSpan: mean(spans),
+    p90NodeSpan: percentile(spans, 0.9)
   };
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
- * Layout options tuned so that edge labels always have room to be read.
+ * Roughly a default-size room with a short name. Spacing only grows *past* this,
+ * so a map that never touches the size scalar lays out exactly as it always did.
+ */
+const NOMINAL_NODE_SPAN = 120;
+
+/** Widest side of a node, in the same base units the layout is solved in. */
+const nodeSpan = (n: any) => {
+  const w = Number(n.data('w'));
+  const h = Number(n.data('h'));
+  return Math.max(
+    Number.isFinite(w) && w > 0 ? w : n.width(),
+    Number.isFinite(h) && h > 0 ? h : n.height()
+  );
+};
+
+/**
+ * Layout options tuned so that edge labels always have room to be read and
+ * over-sized rooms always have room to sit.
  *  - ELK layered: labels live in the gap *between layers*, so that gap scales.
- *  - fCoSE: per-edge ideal length, so only the long labels push nodes apart.
- *  - simple layouts: global spacing factors.
+ *  - fCoSE: per-edge ideal length, so only long labels and big endpoints push
+ *    nodes apart.
+ *  - simple layouts: global spacing factors (their cell size already comes from
+ *    the largest node box, so the scalar is covered).
+ *
+ * Engines are always fed real node boxes (`nodeDimensionsIncludeLabels`), which
+ * is what actually prevents overlap; the terms below add *breathing room* in
+ * proportion to how big the big rooms are.
  */
 export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutOptions {
-  const { nodeCount, avgEdgeLabelWidth: avg, p90EdgeLabelWidth: p90 } = metrics;
+  const { nodeCount, avgEdgeLabelWidth: avg, p90EdgeLabelWidth: p90, p90NodeSpan } = metrics;
   const animate = nodeCount <= 400;
+  /** Extra space the over-sized rooms deserve; 0 on a default map. */
+  const big = Math.max(0, p90NodeSpan - NOMINAL_NODE_SPAN);
 
   switch (name) {
     case 'elk-layered':
@@ -89,16 +118,16 @@ export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutO
           algorithm: 'layered',
           'elk.direction': 'RIGHT',
           'elk.edgeRouting': 'POLYLINE',
-          'elk.spacing.nodeNode': clamp(55 + avg * 0.25, 55, 220),
-          'elk.layered.spacing.nodeNodeBetweenLayers': clamp(130 + p90 * 0.95, 130, 900),
+          'elk.spacing.nodeNode': clamp(55 + avg * 0.25 + big * 0.5, 55, 400),
+          'elk.layered.spacing.nodeNodeBetweenLayers': clamp(130 + p90 * 0.95 + big * 0.5, 130, 1200),
           'elk.spacing.edgeLabel': 12,
-          'elk.spacing.edgeNode': clamp(40 + avg * 0.2, 40, 160),
+          'elk.spacing.edgeNode': clamp(40 + avg * 0.2 + big * 0.25, 40, 240),
           'elk.spacing.edgeEdge': 25,
           'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
           'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
           'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
           'elk.separateConnectedComponents': true,
-          'elk.spacing.componentComponent': clamp(140 + p90 * 0.5, 140, 600)
+          'elk.spacing.componentComponent': clamp(140 + p90 * 0.5 + big, 140, 900)
         }
       } as unknown as LayoutOptions;
 
@@ -112,8 +141,8 @@ export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutO
         elk: {
           algorithm: 'mrtree',
           'elk.direction': 'DOWN',
-          'elk.spacing.nodeNode': clamp(70 + p90 * 0.85, 70, 600),
-          'elk.spacing.edgeNode': clamp(40 + avg * 0.25, 40, 200),
+          'elk.spacing.nodeNode': clamp(70 + p90 * 0.85 + big * 0.6, 70, 700),
+          'elk.spacing.edgeNode': clamp(40 + avg * 0.25 + big * 0.25, 40, 240),
           'elk.spacing.edgeLabel': 12
         }
       } as unknown as LayoutOptions;
@@ -130,11 +159,15 @@ export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutO
         nodeDimensionsIncludeLabels: true,
         uniformNodeDimensions: false,
         packComponents: true,
-        /* long connection names get proportionally longer edges */
-        idealEdgeLength: (edge: any) => 95 + (edge.data('labelWidth') ?? 0) * 1.15,
+        /* long connection names *and* big endpoints get proportionally longer
+           edges, so the name still lands on visible line, not on a box */
+        idealEdgeLength: (edge: any) =>
+          95 +
+          ((edge.data('labelWidth') as number) ?? 0) * 1.15 +
+          Math.max(0, (nodeSpan(edge.source()) + nodeSpan(edge.target())) / 2 - NOMINAL_NODE_SPAN),
         edgeElasticity: () => 0.4,
-        nodeSeparation: clamp(110 + avg * 0.4, 110, 400),
-        nodeRepulsion: () => clamp(9_000 + p90 * 70, 9_000, 60_000),
+        nodeSeparation: clamp(110 + avg * 0.4 + big * 0.6, 110, 600),
+        nodeRepulsion: () => clamp(9_000 + p90 * 70 + big * 120, 9_000, 120_000),
         numIter: nodeCount > 1500 ? 1200 : 2500,
         gravity: 0.25,
         gravityRangeCompound: 1.5,
@@ -158,7 +191,8 @@ export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutO
         name: 'concentric',
         animate,
         padding: 60,
-        minNodeSpacing: clamp(45 + p90 * 0.7, 45, 320),
+        avoidOverlap: true,
+        minNodeSpacing: clamp(45 + p90 * 0.7 + big * 0.5, 45, 420),
         concentric: (n: any) => n.degree(),
         levelWidth: () => 2,
         nodeDimensionsIncludeLabels: true

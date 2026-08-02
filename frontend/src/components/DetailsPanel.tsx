@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { isEffectivelyLocked } from '../graph/connectionRules';
 import { focusGroup, focusLocation } from '../graph/cyHolder';
-import { describeLock, isEffectivelyLocked } from '../graph/elements';
+import { describeLock } from '../graph/elements';
 import { descendantGroupIds, groupPathLabel } from '../graph/groups';
-import GroupPicker, { KEEP } from './GroupPicker';
-import LabelPicker from './LabelPicker';
 import {
   DIRECTION_OPTIONS,
   LINE_STYLE_OPTIONS,
@@ -17,63 +16,49 @@ import {
 } from '../graph/model';
 import { useGraphStore } from '../state/store';
 import type { Connection, ConnectionLabel, Group, Location, LocationLabel } from '../types';
-import { InlineCheckField } from './fields';
-
-/** The mounted inspector's "apply my draft" callback. */
-const inspectorCommit: { current: null | (() => void) } = { current: null };
+import { ColorField, InlineCheckField, LabelChips, OptionalColorField } from './fields';
+import GroupPicker, { KEEP } from './GroupPicker';
+import LabelPicker from './LabelPicker';
+import { inspectorCommit, useDraft } from './useDraft';
 
 const LOCATION_FIELDS = [
-  'name', 'kind', 'layer', 'notes', 'color', 'textColor', 'coordX', 'coordY', 'coordZ'
+  'name', 'kind', 'size', 'layer', 'notes', 'color', 'textColor', 'coordX', 'coordY', 'coordZ'
 ] as const;
+
 const CONNECTION_FIELDS = [
   'name', 'notes', 'travelKind', 'color', 'textColor', 'arrowSource', 'arrowTarget',
   'ephemeral', 'locked', 'lockNote', 'weight', 'requires'
 ] as const;
-const GROUP_FIELDS = ['name', 'color', 'textColor', 'notes'] as const;
+
 /** parentId is structural, so it commits through setGroupParent, but it still
  *  lives in the draft so Apply/Revert behave like every other field. */
-const GROUP_DRAFT_FIELDS = [...GROUP_FIELDS, 'parentId'] as const;
+const GROUP_FIELDS = ['name', 'color', 'textColor', 'notes', 'parentId'] as const;
+
 const LOCATION_LABEL_FIELDS = [
-  'name', 'color', 'notes', 'defaultKind', 'defaultColor', 'defaultTextColor', 'defaultLayer',
-  'defaultGroupId'
+  'name', 'color', 'notes', 'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor',
+  'defaultLayer', 'defaultGroupId'
 ] as const;
+
 const CONNECTION_LABEL_FIELDS = [
   'name', 'color', 'notes', 'defaultColor', 'defaultTextColor', 'defaultTravelKind',
   'defaultDirection', 'defaultWeight', 'defaultEphemeral', 'defaultLocked',
   'defaultLockNote', 'defaultRequires'
 ] as const;
 
-const differs = <T,>(a: T, b: T, fields: readonly (keyof T)[]) =>
-  fields.some((f) => JSON.stringify(a[f]) !== JSON.stringify(b[f]));
-
-const pick = <T, K extends keyof T>(obj: T, fields: readonly K[]) =>
-  Object.fromEntries(fields.map((f) => [f, obj[f]])) as Pick<T, K>;
-
-function ColorField({
-  label,
-  value,
-  fallback,
-  onChange
-}: {
-  label: string;
-  value: string;
-  fallback: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="color-field">
-      <span className="field-label">{label}</span>
-      <div className="color-row">
-        <input type="color" value={value || fallback} onChange={(e) => onChange(e.target.value)} />
-        <button onClick={() => onChange('')} disabled={!value} title="Use Theme Default">
-          Default
-        </button>
-      </div>
-    </div>
-  );
-}
+const normaliseLocation = (l: Location): Location => ({ ...l, kind: normaliseShape(l.kind) });
+const normaliseConnection = (c: Connection): Connection => ({
+  ...c,
+  travelKind: normaliseLineStyle(c.travelKind)
+});
 
 const coordText = (v: number | null) => (v === null || v === undefined ? '' : String(v));
+
+/** A location's size is a positive scalar on its box; 1 is "normal". */
+const MAX_SIZE = 25;
+const parseSize = (raw: string, fallback: number) => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.min(MAX_SIZE, n) : fallback;
+};
 
 /** Whole numbers only; blank (or a lone "-") means "no coordinate". */
 const parseCoord = (s: string): number | null => {
@@ -88,7 +73,6 @@ const parseCoord = (s: string): number | null => {
  *   → one-way arriving at this room   ← one-way leaving it   ⇄ both   — neither
  */
 function relativeGlyph(c: Connection, selfId: string): string {
-  /* which end carries an arrowhead, expressed relative to `selfId` */
   const intoSelf = c.sourceId === selfId ? c.arrowSource : c.arrowTarget;
   const outOfSelf = c.sourceId === selfId ? c.arrowTarget : c.arrowSource;
   if (intoSelf && outOfSelf) return '⇄';
@@ -99,78 +83,16 @@ function relativeGlyph(c: Connection, selfId: string): string {
 
 /** "(Kitchen)" for a room inside a grouping, "" otherwise. */
 const groupSuffix = (loc: Location | undefined, groups: Record<string, Group>) =>
-  loc?.groupId && groups[loc.groupId]
-    ? `(${groups[loc.groupId]!.name || 'Unnamed Grouping'})`
-    : '';
+  loc?.groupId && groups[loc.groupId] ? `(${groups[loc.groupId]!.name || 'Unnamed Grouping'})` : '';
 
 /** Full path, used as the tooltip so nested groupings stay discoverable. */
 const groupTitle = (loc: Location | undefined, groups: Record<string, Group>) =>
   loc?.groupId && groups[loc.groupId] ? groupPathLabel(groups, loc.groupId) : undefined;
 
-/** A colour that may be "unset" (no override) — used by label default fields. */
-function OptionalColorField({
-  label,
-  value,
-  fallback,
-  onChange
-}: {
-  label: string;
-  value: string;
-  fallback: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="color-field">
-      <span className="field-label">{label}</span>
-      <div className="color-row">
-        <input
-          type="checkbox"
-          checked={!!value}
-          title="Override"
-          onChange={(e) => onChange(e.target.checked ? value || fallback : '')}
-        />
-        <input
-          type="color"
-          value={value || fallback}
-          disabled={!value}
-          onChange={(e) => onChange(e.target.value)}
-        />
-        <span className="muted small">{value ? 'Override' : 'No Override'}</span>
-      </div>
-    </div>
-  );
-}
-
-/** Chips with a per-label "Apply" so any earlier label's styling can be re-stamped. */
-function LabelChips({
-  labels,
-  onApply,
-  onRemove
-}: {
-  labels: Array<{ id: string; name: string; color: string }>;
-  onApply: (id: string) => void;
-  onRemove: (id: string) => void;
-}) {
-  if (!labels.length) return <p className="muted small">No Labels Applied.</p>;
-  return (
-    <ul className="chip-list">
-      {labels.map((l) => (
-        <li key={l.id} className="chip">
-          <span className="chip-dot" style={{ background: l.color || '#8897ad' }} />
-          <span className="chip-name">{l.name || 'Unnamed Label'}</span>
-          <button className="chip-btn" title="Apply This Label's Styling" onClick={() => onApply(l.id)}>
-            Apply
-          </button>
-          <button className="chip-btn danger" title="Remove Label" onClick={() => onRemove(l.id)}>
-            ✕
-          </button>
-        </li>
-      ))}
-    </ul>
-  );
-}
+const byName = <T extends { name: string }>(a: T, b: T) => (a.name || '').localeCompare(b.name || '');
 
 /* ------------------------------------------------------------ Location form */
+
 function LocationInspector({ location }: { location: Location }) {
   const updateLocation = useGraphStore((s) => s.updateLocation);
   const deleteLocation = useGraphStore((s) => s.deleteLocation);
@@ -187,54 +109,27 @@ function LocationInspector({ location }: { location: Location }) {
   const unassignLocationLabel = useGraphStore((s) => s.unassignLocationLabel);
   const applyLocationLabelStyling = useGraphStore((s) => s.applyLocationLabelStyling);
   const createLocationLabel = useGraphStore((s) => s.createLocationLabel);
-  const selectLocationLabel = useGraphStore((s) => s.selectLocationLabel);
 
-  const [draft, setDraft] = useState<Location>({ ...location, kind: normaliseShape(location.kind) });
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const baseRef = useRef(location);
-  const skipRef = useRef(false);
-
-  useEffect(() => {
-    baseRef.current = location;
-    setDraft({ ...location, kind: normaliseShape(location.kind) });
-  }, [location.id, location.updatedAt]);
-
-  const dirty = differs(draft, baseRef.current, LOCATION_FIELDS);
-
-  const commit = useCallback(() => {
-    if (skipRef.current) return;
-    const d = draftRef.current;
-    if (!differs(d, baseRef.current, LOCATION_FIELDS)) return;
-    baseRef.current = { ...baseRef.current, ...pick(d, LOCATION_FIELDS) };
-    void updateLocation(d.id, pick(d, LOCATION_FIELDS));
-  }, [updateLocation]);
-
-  useEffect(() => {
-    inspectorCommit.current = commit;
-    return () => {
-      if (inspectorCommit.current === commit) inspectorCommit.current = null;
-      commit();
-    };
-  }, [commit]);
-
-  const related = useMemo(
-    () =>
-      Object.values(connections).filter(
-        (c) => c.sourceId === location.id || c.targetId === location.id
-      ),
-    [connections, location.id]
+  const save = useCallback(
+    (id: string, patch: Partial<Location>) => updateLocation(id, patch),
+    [updateLocation]
+  );
+  const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(
+    location,
+    LOCATION_FIELDS,
+    save,
+    normaliseLocation
   );
 
+  const related = useMemo(
+    () => Object.values(connections).filter((c) => c.sourceId === location.id || c.targetId === location.id),
+    [connections, location.id]
+  );
   const visitedSet = useMemo(
     () => new Set(Object.values(locations).filter((l) => l.visited).map((l) => l.id)),
     [locations]
   );
-
-  const groupList = useMemo(
-    () => Object.values(groups).sort((a, b) => (a.name || '').localeCompare(b.name || '')),
-    [groups]
-  );
+  const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
 
   return (
     <>
@@ -244,7 +139,7 @@ function LocationInspector({ location }: { location: Location }) {
           className="danger"
           onClick={() => {
             if (confirm('Delete this location and all of its connections?')) {
-              skipRef.current = true;
+              cancelCommit();
               void deleteLocation(location.id);
             }
           }}
@@ -277,38 +172,32 @@ function LocationInspector({ location }: { location: Location }) {
         </label>
       </div>
 
+      <label>
+        Size — Scale Relative To Every Other Location (1 = Normal)
+        <input
+          type="number"
+          min={0.1}
+          max={MAX_SIZE}
+          step={0.1}
+          value={draft.size}
+          onChange={(e) => setDraft((d) => ({ ...d, size: parseSize(e.target.value, d.size) }))}
+        />
+      </label>
+
       <div className="field">
-        <span className="field-label">
-          Coordinates — Whole Numbers, Negatives Allowed, Blank = None
-        </span>
+        <span className="field-label">Coordinates — Whole Numbers, Negatives Allowed, Blank = None</span>
         <div className="row coords">
-          <label>
-            X
-            <input
-              type="number"
-              step={1}
-              value={coordText(draft.coordX)}
-              onChange={(e) => setDraft({ ...draft, coordX: parseCoord(e.target.value) })}
-            />
-          </label>
-          <label>
-            Y
-            <input
-              type="number"
-              step={1}
-              value={coordText(draft.coordY)}
-              onChange={(e) => setDraft({ ...draft, coordY: parseCoord(e.target.value) })}
-            />
-          </label>
-          <label>
-            Z
-            <input
-              type="number"
-              step={1}
-              value={coordText(draft.coordZ)}
-              onChange={(e) => setDraft({ ...draft, coordZ: parseCoord(e.target.value) })}
-            />
-          </label>
+          {(['coordX', 'coordY', 'coordZ'] as const).map((key) => (
+            <label key={key}>
+              {key.slice(-1)}
+              <input
+                type="number"
+                step={1}
+                value={coordText(draft[key])}
+                onChange={(e) => setDraft({ ...draft, [key]: parseCoord(e.target.value) })}
+              />
+            </label>
+          ))}
         </div>
       </div>
 
@@ -322,6 +211,7 @@ function LocationInspector({ location }: { location: Location }) {
           onCreateNew={() => void createGroupFrom([location.id])}
         />
       </div>
+
       {location.groupId && groups[location.groupId] && (
         <button className="link subtle" onClick={() => focusGroup(location.groupId!, selectGroup)}>
           Inspect "{groupPathLabel(groups, location.groupId)}"
@@ -369,12 +259,7 @@ function LocationInspector({ location }: { location: Location }) {
 
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
-        <button
-          disabled={!dirty}
-          onClick={() => setDraft({ ...baseRef.current, kind: normaliseShape(baseRef.current.kind) })}
-        >
-          Revert
-        </button>
+        <button disabled={!dirty} onClick={revert}>Revert</button>
       </div>
 
       <InlineCheckField
@@ -398,16 +283,10 @@ function LocationInspector({ location }: { location: Location }) {
                   {suffix && <span className="muted in-group"> {suffix}</span>}
                 </span>
                 <span className="muted small">
-                  {[c.name, c.ephemeral ? 'Ephemeral' : null, `Weight ${c.weight}`]
-                    .filter(Boolean)
-                    .join(' · ')}
+                  {[c.name, c.ephemeral ? 'Ephemeral' : null, `Weight ${c.weight}`].filter(Boolean).join(' · ')}
                 </span>
               </button>
-              <button
-                className="icon"
-                title="Jump To The Other Location"
-                onClick={() => focusLocation(other, selectLocation)}
-              >
+              <button className="icon" title="Jump To The Other Location" onClick={() => focusLocation(other, selectLocation)}>
                 ⤴
               </button>
             </li>
@@ -422,6 +301,7 @@ function LocationInspector({ location }: { location: Location }) {
 }
 
 /* ---------------------------------------------------------- Connection form */
+
 function ConnectionInspector({ connection }: { connection: Connection }) {
   const locations = useGraphStore((s) => s.locations);
   const groups = useGraphStore((s) => s.groups);
@@ -433,56 +313,29 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
   const unassignConnectionLabel = useGraphStore((s) => s.unassignConnectionLabel);
   const applyConnectionLabelStyling = useGraphStore((s) => s.applyConnectionLabelStyling);
   const createConnectionLabel = useGraphStore((s) => s.createConnectionLabel);
-  const selectConnectionLabel = useGraphStore((s) => s.selectConnectionLabel);
 
-  const normalise = (c: Connection): Connection => ({
-    ...c,
-    travelKind: normaliseLineStyle(c.travelKind)
-  });
+  const save = useCallback(
+    (id: string, patch: Partial<Connection>) => updateConnection(id, patch),
+    [updateConnection]
+  );
+  const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(
+    connection,
+    CONNECTION_FIELDS,
+    save,
+    normaliseConnection
+  );
 
-  const [draft, setDraft] = useState<Connection>(normalise(connection));
   const [reqToAdd, setReqToAdd] = useState('');
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const baseRef = useRef(connection);
-  const skipRef = useRef(false);
-
-  useEffect(() => {
-    baseRef.current = connection;
-    setDraft(normalise(connection));
-  }, [connection.id, connection.updatedAt]);
-
-  const dirty = differs(draft, baseRef.current, CONNECTION_FIELDS);
-
-  const commit = useCallback(() => {
-    if (skipRef.current) return;
-    const d = draftRef.current;
-    if (!differs(d, baseRef.current, CONNECTION_FIELDS)) return;
-    baseRef.current = { ...baseRef.current, ...pick(d, CONNECTION_FIELDS) };
-    void updateConnection(d.id, pick(d, CONNECTION_FIELDS));
-  }, [updateConnection]);
-
-  useEffect(() => {
-    inspectorCommit.current = commit;
-    return () => {
-      if (inspectorCommit.current === commit) inspectorCommit.current = null;
-      commit();
-    };
-  }, [commit]);
 
   const visitedSet = useMemo(
     () => new Set(Object.values(locations).filter((l) => l.visited).map((l) => l.id)),
     [locations]
   );
+  const sortedLocations = useMemo(() => Object.values(locations).sort(byName), [locations]);
 
   const source = locations[connection.sourceId];
   const target = locations[connection.targetId];
   const locked = isEffectivelyLocked(connection, visitedSet);
-
-  const sortedLocations = useMemo(
-    () => Object.values(locations).sort((a, b) => (a.name || '').localeCompare(b.name || '')),
-    [locations]
-  );
 
   return (
     <>
@@ -492,7 +345,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
           className="danger"
           onClick={() => {
             if (confirm('Delete this connection?')) {
-              skipRef.current = true;
+              cancelCommit();
               void deleteConnection(connection.id);
             }
           }}
@@ -502,48 +355,32 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
       </div>
 
       <div className="endpoints">
-        <button
-          className="link"
-          title={groupTitle(source, groups)}
-          onClick={() => focusLocation(connection.sourceId, selectLocation)}
-        >
+        <button className="link" title={groupTitle(source, groups)} onClick={() => focusLocation(connection.sourceId, selectLocation)}>
           <span>{source?.name || 'Unnamed Location'}</span>
-          {groupSuffix(source, groups) && (
-            <span className="muted small">{groupSuffix(source, groups)}</span>
-          )}
+          {groupSuffix(source, groups) && <span className="muted small">{groupSuffix(source, groups)}</span>}
         </button>
         <span className="arrow">{directionGlyph(draft)}</span>
-        <button
-          className="link"
-          title={groupTitle(target, groups)}
-          onClick={() => focusLocation(connection.targetId, selectLocation)}
-        >
+        <button className="link" title={groupTitle(target, groups)} onClick={() => focusLocation(connection.targetId, selectLocation)}>
           <span>{target?.name || 'Unnamed Location'}</span>
-          {groupSuffix(target, groups) && (
-            <span className="muted small">{groupSuffix(target, groups)}</span>
-          )}
+          {groupSuffix(target, groups) && <span className="muted small">{groupSuffix(target, groups)}</span>}
         </button>
         <button
           className="icon"
           title="Swap Endpoints"
-          onClick={() => {
-            skipRef.current = true;
+          onClick={() =>
+            /* endpoints are not draft fields, and the row that comes back is
+               merged into whatever is half-typed, so nothing needs suspending */
             void updateConnection(connection.id, {
               sourceId: connection.targetId,
               targetId: connection.sourceId
-            }).finally(() => {
-              /* must re-enable autosave even if the request failed */
-              skipRef.current = false;
-            });
-          }}
+            })
+          }
         >
           ⇅
         </button>
       </div>
 
-      <p className="muted small">
-        Drag Either Amber Handle On The Map To Re-Attach That End To Another Room.
-      </p>
+      <p className="muted small">Drag Either Amber Handle On The Map To Re-Attach That End To Another Room.</p>
 
       {locked && <div className="lock-banner">🔒 {describeLock(connection, locations)}</div>}
 
@@ -558,10 +395,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
 
       <label>
         Direction
-        <select
-          value={directionOf(draft)}
-          onChange={(e) => setDraft({ ...draft, ...arrowsFor(e.target.value as any) })}
-        >
+        <select value={directionOf(draft)} onChange={(e) => setDraft({ ...draft, ...arrowsFor(e.target.value as any) })}>
           {DIRECTION_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
@@ -571,10 +405,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
       <div className="row">
         <label>
           Line Style
-          <select
-            value={draft.travelKind}
-            onChange={(e) => setDraft({ ...draft, travelKind: e.target.value })}
-          >
+          <select value={draft.travelKind} onChange={(e) => setDraft({ ...draft, travelKind: e.target.value })}>
             {LINE_STYLE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
@@ -593,12 +424,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
       </div>
 
       <div className="row">
-        <ColorField
-          label="Line Color"
-          value={draft.color}
-          fallback={PALETTE.edge}
-          onChange={(color) => setDraft({ ...draft, color })}
-        />
+        <ColorField label="Line Color" value={draft.color} fallback={PALETTE.edge} onChange={(color) => setDraft({ ...draft, color })} />
         <ColorField
           label="Text Color"
           value={draft.textColor}
@@ -614,34 +440,26 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
           checked={draft.ephemeral}
           onChange={(v) => setDraft({ ...draft, ephemeral: v })}
         />
-        <InlineCheckField
-          label="Locked"
-          checked={draft.locked}
-          onChange={(v) => setDraft({ ...draft, locked: v })}
-        />
+        <InlineCheckField label="Locked" checked={draft.locked} onChange={(v) => setDraft({ ...draft, locked: v })} />
       </div>
 
       {draft.locked && (
         <fieldset className="lock-box">
           <legend>Unlock Conditions</legend>
           <p className="muted small">
-            The connection opens once <em>all</em> of these locations have been visited.
-            Leave it empty for a permanently locked link.
+            The connection opens once <em>all</em> of these locations have been visited. Leave it empty for a
+            permanently locked link.
           </p>
           <ul className="req-list">
             {draft.requires.map((id) => (
               <li key={id}>
-                <span className={visitedSet.has(id) ? 'ok' : 'pending'}>
-                  {visitedSet.has(id) ? '✔' : '○'}
-                </span>
+                <span className={visitedSet.has(id) ? 'ok' : 'pending'}>{visitedSet.has(id) ? '✔' : '○'}</span>
                 <button className="link" onClick={() => focusLocation(id, selectLocation)}>
                   {locations[id]?.name || 'Unnamed Location'}
                 </button>
                 <button
                   className="icon danger"
-                  onClick={() =>
-                    setDraft({ ...draft, requires: draft.requires.filter((r) => r !== id) })
-                  }
+                  onClick={() => setDraft({ ...draft, requires: draft.requires.filter((r) => r !== id) })}
                 >
                   ✕
                 </button>
@@ -683,9 +501,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
 
       <h3>Labels</h3>
       <LabelChips
-        labels={
-          connection.labelIds.map((id) => connectionLabels[id]).filter(Boolean) as ConnectionLabel[]
-        }
+        labels={connection.labelIds.map((id) => connectionLabels[id]).filter(Boolean) as ConnectionLabel[]}
         onApply={(labelId) => void applyConnectionLabelStyling(connection.id, labelId)}
         onRemove={(labelId) => void unassignConnectionLabel(connection.id, labelId)}
       />
@@ -698,16 +514,12 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
 
       <label>
         Notes
-        <textarea
-          rows={6}
-          value={draft.notes}
-          onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-        />
+        <textarea rows={6} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
       </label>
 
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
-        <button disabled={!dirty} onClick={() => setDraft(normalise(baseRef.current))}>Revert</button>
+        <button disabled={!dirty} onClick={revert}>Revert</button>
       </div>
 
       <p className="muted small">Updated {new Date(connection.updatedAt).toLocaleString()}</p>
@@ -716,6 +528,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
 }
 
 /* --------------------------------------------------------- Grouping form */
+
 function GroupInspector({ group }: { group: Group }) {
   const locations = useGraphStore((s) => s.locations);
   const groups = useGraphStore((s) => s.groups);
@@ -728,59 +541,31 @@ function GroupInspector({ group }: { group: Group }) {
   const selectGroup = useGraphStore((s) => s.selectGroup);
   const runLayout = useGraphStore((s) => s.runLayout);
 
-  const [draft, setDraft] = useState<Group>(group);
+  /* the parent is structural: it validates and re-layouts, so it goes its own way */
+  const save = useCallback(
+    (id: string, patch: Partial<Group>) => {
+      const { parentId, ...rest } = patch;
+      const writes: Array<Promise<unknown>> = [];
+      if (Object.keys(rest).length) writes.push(updateGroup(id, rest));
+      if (parentId !== undefined) writes.push(setGroupParent(id, parentId));
+      return Promise.all(writes);
+    },
+    [updateGroup, setGroupParent]
+  );
+  const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(group, GROUP_FIELDS, save);
+
   const [toAdd, setToAdd] = useState('');
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const baseRef = useRef(group);
-  const skipRef = useRef(false);
-
-  useEffect(() => {
-    baseRef.current = group;
-    setDraft(group);
-  }, [group.id, group.updatedAt]);
-
-  const dirty = differs(draft, baseRef.current, GROUP_DRAFT_FIELDS);
-
-  const commit = useCallback(() => {
-    if (skipRef.current) return;
-    const d = draftRef.current;
-    const b = baseRef.current;
-    if (!differs(d, b, GROUP_DRAFT_FIELDS)) return;
-    const parentChanged = d.parentId !== b.parentId;
-    baseRef.current = { ...b, ...pick(d, GROUP_DRAFT_FIELDS) };
-    if (differs(d, b, GROUP_FIELDS)) void updateGroup(d.id, pick(d, GROUP_FIELDS));
-    if (parentChanged) void setGroupParent(d.id, d.parentId); // validates + re-layouts
-  }, [updateGroup, setGroupParent]);
-
-  useEffect(() => {
-    inspectorCommit.current = commit;
-    return () => {
-      if (inspectorCommit.current === commit) inspectorCommit.current = null;
-      commit();
-    };
-  }, [commit]);
 
   const members = useMemo(
-    () =>
-      Object.values(locations)
-        .filter((l) => l.groupId === group.id)
-        .sort((a, b) => (a.name || '').localeCompare(b.name || '')),
+    () => Object.values(locations).filter((l) => l.groupId === group.id).sort(byName),
     [locations, group.id]
   );
-
   const outsiders = useMemo(
-    () =>
-      Object.values(locations)
-        .filter((l) => l.groupId !== group.id)
-        .sort((a, b) => (a.name || '').localeCompare(b.name || '')),
+    () => Object.values(locations).filter((l) => l.groupId !== group.id).sort(byName),
     [locations, group.id]
   );
-
-  const groupList = useMemo(
-    () => Object.values(groups).sort((a, b) => (a.name || '').localeCompare(b.name || '')),
-    [groups]
-  );
+  const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
+  const subGroups = groupList.filter((g) => g.parentId === group.id);
 
   return (
     <>
@@ -790,7 +575,7 @@ function GroupInspector({ group }: { group: Group }) {
           className="danger"
           onClick={() => {
             if (confirm('Delete this grouping? The rooms inside it are kept.')) {
-              skipRef.current = true;
+              cancelCommit();
               void deleteGroup(group.id);
             }
           }}
@@ -844,16 +629,12 @@ function GroupInspector({ group }: { group: Group }) {
 
       <label>
         Notes
-        <textarea
-          rows={5}
-          value={draft.notes}
-          onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-        />
+        <textarea rows={5} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
       </label>
 
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
-        <button disabled={!dirty} onClick={() => setDraft(baseRef.current)}>Revert</button>
+        <button disabled={!dirty} onClick={revert}>Revert</button>
         <button onClick={runLayout}>Re-Layout</button>
       </div>
 
@@ -865,41 +646,27 @@ function GroupInspector({ group }: { group: Group }) {
               <span className="hit-title">{l.name || 'Unnamed Location'}</span>
               <span className="muted small">{l.layer || 'No Layer'}</span>
             </button>
-            <button
-              className="icon danger"
-              title="Remove From Grouping"
-              onClick={() => void setLocationGroup(l.id, null)}
-            >
+            <button className="icon danger" title="Remove From Grouping" onClick={() => void setLocationGroup(l.id, null)}>
               ✕
             </button>
           </li>
         ))}
-        {members.length === 0 && (
-          <li className="muted small">Empty Groupings Are Not Drawn On The Map.</li>
-        )}
+        {members.length === 0 && <li className="muted small">Empty Groupings Are Not Drawn On The Map.</li>}
       </ul>
 
       <h3>Sub-Groupings</h3>
       <ul className="hit-list dense">
-        {groupList
-          .filter((g) => g.parentId === group.id)
-          .map((g) => (
-            <li key={g.id}>
-              <button className="link" onClick={() => focusGroup(g.id, selectGroup)}>
-                <span className="hit-title">{g.name || 'Unnamed Grouping'}</span>
-              </button>
-              <button
-                className="icon danger"
-                title="Move To Top Level"
-                onClick={() => void setGroupParent(g.id, null)}
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        {groupList.every((g) => g.parentId !== group.id) && (
-          <li className="muted small">None.</li>
-        )}
+        {subGroups.map((g) => (
+          <li key={g.id}>
+            <button className="link" onClick={() => focusGroup(g.id, selectGroup)}>
+              <span className="hit-title">{g.name || 'Unnamed Grouping'}</span>
+            </button>
+            <button className="icon danger" title="Move To Top Level" onClick={() => void setGroupParent(g.id, null)}>
+              ✕
+            </button>
+          </li>
+        ))}
+        {subGroups.length === 0 && <li className="muted small">None.</li>}
       </ul>
 
       <div className="row">
@@ -920,10 +687,7 @@ function GroupInspector({ group }: { group: Group }) {
         </button>
       </div>
 
-      <button
-        disabled={members.length === 0}
-        onClick={() => void ungroupAll(group.id)}
-      >
+      <button disabled={members.length === 0} onClick={() => void ungroupAll(group.id)}>
         Remove All Rooms
       </button>
 
@@ -933,6 +697,7 @@ function GroupInspector({ group }: { group: Group }) {
 }
 
 /* ------------------------------------------------- Location label form */
+
 function LocationLabelInspector({ label }: { label: LocationLabel }) {
   const groups = useGraphStore((s) => s.groups);
   const locations = useGraphStore((s) => s.locations);
@@ -941,34 +706,11 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
   const applyToAll = useGraphStore((s) => s.applyLocationLabelToAll);
   const selectLocation = useGraphStore((s) => s.selectLocation);
 
-  const [draft, setDraft] = useState(label);
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const baseRef = useRef(label);
-  const skipRef = useRef(false);
-
-  useEffect(() => {
-    baseRef.current = label;
-    setDraft(label);
-  }, [label.id, label.updatedAt]);
-
-  const dirty = differs(draft, baseRef.current, LOCATION_LABEL_FIELDS);
-
-  const commit = useCallback(() => {
-    if (skipRef.current) return;
-    const d = draftRef.current;
-    if (!differs(d, baseRef.current, LOCATION_LABEL_FIELDS)) return;
-    baseRef.current = { ...baseRef.current, ...pick(d, LOCATION_LABEL_FIELDS) };
-    void updateLocationLabel(d.id, pick(d, LOCATION_LABEL_FIELDS));
-  }, [updateLocationLabel]);
-
-  useEffect(() => {
-    inspectorCommit.current = commit;
-    return () => {
-      if (inspectorCommit.current === commit) inspectorCommit.current = null;
-      commit();
-    };
-  }, [commit]);
+  const save = useCallback(
+    (id: string, patch: Partial<LocationLabel>) => updateLocationLabel(id, patch),
+    [updateLocationLabel]
+  );
+  const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(label, LOCATION_LABEL_FIELDS, save);
 
   const groupList = useMemo(() => Object.values(groups), [groups]);
   const members = useMemo(
@@ -984,7 +726,7 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
           className="danger"
           onClick={() => {
             if (confirm('Delete this label? Rooms keep the styling they were given.')) {
-              skipRef.current = true;
+              cancelCommit();
               void deleteLocationLabel(label.id);
             }
           }}
@@ -998,30 +740,39 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
         <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
       </label>
 
-      <ColorField
-        label="Chip Color"
-        value={draft.color}
-        fallback="#8897ad"
-        onChange={(color) => setDraft({ ...draft, color })}
-      />
+      <ColorField label="Chip Color" value={draft.color} fallback="#8897ad" onChange={(color) => setDraft({ ...draft, color })} />
 
       <h3>Defaults (Opt-In)</h3>
       <p className="muted small">
-        Anything left blank is never applied. These are stamped onto a room when the label is
-        applied to it.
+        Anything left blank is never applied. These are stamped onto a room when the label is applied to it.
       </p>
 
       <label>
         Default Shape
-        <select
-          value={draft.defaultKind}
-          onChange={(e) => setDraft({ ...draft, defaultKind: e.target.value })}
-        >
+        <select value={draft.defaultKind} onChange={(e) => setDraft({ ...draft, defaultKind: e.target.value })}>
           <option value="">No Override</option>
           {SHAPE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
+      </label>
+
+      <label>
+        Default Size
+        <input
+          type="number"
+          min={0.1}
+          max={MAX_SIZE}
+          step={0.1}
+          value={draft.defaultSize ?? ''}
+          placeholder="No Override"
+          onChange={(e) =>
+            setDraft((d) => ({
+              ...d,
+              defaultSize: e.target.value === '' ? null : parseSize(e.target.value, d.defaultSize ?? 1)
+            }))
+          }
+        />
       </label>
 
       <div className="row">
@@ -1060,19 +811,22 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
 
       <label>
         Notes
-        <textarea
-          rows={4}
-          value={draft.notes}
-          onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-        />
+        <textarea rows={4} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
       </label>
 
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
-        <button disabled={!dirty} onClick={() => setDraft(baseRef.current)}>Revert</button>
+        <button disabled={!dirty} onClick={revert}>Revert</button>
       </div>
 
-      <button disabled={!members.length} onClick={() => void applyToAll(label.id)}>
+      <button
+        disabled={!members.length}
+        onClick={async () => {
+          /* stamp the defaults the user can see, not the ones last saved */
+          await commit();
+          await applyToAll(label.id);
+        }}
+      >
         Re-Apply Styling To All {members.length} Rooms
       </button>
 
@@ -1094,6 +848,10 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
 }
 
 /* ----------------------------------------------- Connection label form */
+
+const triState = (v: boolean | null) => (v === null ? '' : v ? 'yes' : 'no');
+const fromTri = (v: string): boolean | null => (v === '' ? null : v === 'yes');
+
 function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
   const locations = useGraphStore((s) => s.locations);
   const connections = useGraphStore((s) => s.connections);
@@ -1102,46 +860,19 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
   const applyToAll = useGraphStore((s) => s.applyConnectionLabelToAll);
   const selectConnection = useGraphStore((s) => s.selectConnection);
 
-  const [draft, setDraft] = useState(label);
+  const save = useCallback(
+    (id: string, patch: Partial<ConnectionLabel>) => updateConnectionLabel(id, patch),
+    [updateConnectionLabel]
+  );
+  const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(label, CONNECTION_LABEL_FIELDS, save);
+
   const [reqToAdd, setReqToAdd] = useState('');
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const baseRef = useRef(label);
-  const skipRef = useRef(false);
-
-  useEffect(() => {
-    baseRef.current = label;
-    setDraft(label);
-  }, [label.id, label.updatedAt]);
-
-  const dirty = differs(draft, baseRef.current, CONNECTION_LABEL_FIELDS);
-
-  const commit = useCallback(() => {
-    if (skipRef.current) return;
-    const d = draftRef.current;
-    if (!differs(d, baseRef.current, CONNECTION_LABEL_FIELDS)) return;
-    baseRef.current = { ...baseRef.current, ...pick(d, CONNECTION_LABEL_FIELDS) };
-    void updateConnectionLabel(d.id, pick(d, CONNECTION_LABEL_FIELDS));
-  }, [updateConnectionLabel]);
-
-  useEffect(() => {
-    inspectorCommit.current = commit;
-    return () => {
-      if (inspectorCommit.current === commit) inspectorCommit.current = null;
-      commit();
-    };
-  }, [commit]);
 
   const members = useMemo(
     () => Object.values(connections).filter((c) => c.labelIds.includes(label.id)),
     [connections, label.id]
   );
-  const sortedLocations = useMemo(
-    () => Object.values(locations).sort((a, b) => (a.name || '').localeCompare(b.name || '')),
-    [locations]
-  );
-  const triState = (v: boolean | null) => (v === null ? '' : v ? 'yes' : 'no');
-  const fromTri = (v: string): boolean | null => (v === '' ? null : v === 'yes');
+  const sortedLocations = useMemo(() => Object.values(locations).sort(byName), [locations]);
 
   return (
     <>
@@ -1151,7 +882,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
           className="danger"
           onClick={() => {
             if (confirm('Delete this label? Connections keep the styling they were given.')) {
-              skipRef.current = true;
+              cancelCommit();
               void deleteConnectionLabel(label.id);
             }
           }}
@@ -1165,12 +896,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
         <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
       </label>
 
-      <ColorField
-        label="Chip Color"
-        value={draft.color}
-        fallback="#8897ad"
-        onChange={(color) => setDraft({ ...draft, color })}
-      />
+      <ColorField label="Chip Color" value={draft.color} fallback="#8897ad" onChange={(color) => setDraft({ ...draft, color })} />
 
       <h3>Defaults (Opt-In)</h3>
       <p className="muted small">Anything set to "No Override" is never applied.</p>
@@ -1193,10 +919,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
       <div className="row">
         <label>
           Default Direction
-          <select
-            value={draft.defaultDirection}
-            onChange={(e) => setDraft({ ...draft, defaultDirection: e.target.value })}
-          >
+          <select value={draft.defaultDirection} onChange={(e) => setDraft({ ...draft, defaultDirection: e.target.value })}>
             <option value="">No Override</option>
             {DIRECTION_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -1205,10 +928,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
         </label>
         <label>
           Default Line Style
-          <select
-            value={draft.defaultTravelKind}
-            onChange={(e) => setDraft({ ...draft, defaultTravelKind: e.target.value })}
-          >
+          <select value={draft.defaultTravelKind} onChange={(e) => setDraft({ ...draft, defaultTravelKind: e.target.value })}>
             <option value="">No Override</option>
             {LINE_STYLE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
@@ -1227,19 +947,13 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
             value={draft.defaultWeight ?? ''}
             placeholder="No Override"
             onChange={(e) =>
-              setDraft({
-                ...draft,
-                defaultWeight: e.target.value === '' ? null : Number(e.target.value) || 1
-              })
+              setDraft({ ...draft, defaultWeight: e.target.value === '' ? null : Number(e.target.value) || 1 })
             }
           />
         </label>
         <label>
           Default Ephemeral
-          <select
-            value={triState(draft.defaultEphemeral)}
-            onChange={(e) => setDraft({ ...draft, defaultEphemeral: fromTri(e.target.value) })}
-          >
+          <select value={triState(draft.defaultEphemeral)} onChange={(e) => setDraft({ ...draft, defaultEphemeral: fromTri(e.target.value) })}>
             <option value="">No Override</option>
             <option value="yes">Ephemeral</option>
             <option value="no">Not Ephemeral</option>
@@ -1249,10 +963,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
 
       <label>
         Default Locked
-        <select
-          value={triState(draft.defaultLocked)}
-          onChange={(e) => setDraft({ ...draft, defaultLocked: fromTri(e.target.value) })}
-        >
+        <select value={triState(draft.defaultLocked)} onChange={(e) => setDraft({ ...draft, defaultLocked: fromTri(e.target.value) })}>
           <option value="">No Override</option>
           <option value="yes">Locked</option>
           <option value="no">Unlocked</option>
@@ -1270,10 +981,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
                 <button
                   className="icon danger"
                   onClick={() =>
-                    setDraft({
-                      ...draft,
-                      defaultRequires: draft.defaultRequires.filter((r) => r !== id)
-                    })
+                    setDraft({ ...draft, defaultRequires: draft.defaultRequires.filter((r) => r !== id) })
                   }
                 >
                   ✕
@@ -1314,19 +1022,22 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
 
       <label>
         Notes
-        <textarea
-          rows={4}
-          value={draft.notes}
-          onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-        />
+        <textarea rows={4} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
       </label>
 
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
-        <button disabled={!dirty} onClick={() => setDraft(baseRef.current)}>Revert</button>
+        <button disabled={!dirty} onClick={revert}>Revert</button>
       </div>
 
-      <button disabled={!members.length} onClick={() => void applyToAll(label.id)}>
+      <button
+        disabled={!members.length}
+        onClick={async () => {
+          /* stamp the defaults the user can see, not the ones last saved */
+          await commit();
+          await applyToAll(label.id);
+        }}
+      >
         Re-Apply Styling To All {members.length} Connections
       </button>
 
@@ -1337,9 +1048,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
             <button className="link" onClick={() => selectConnection(c.id)}>
               <span className="hit-title">
                 {c.name ||
-                  `${locations[c.sourceId]?.name || 'Unnamed'} → ${
-                    locations[c.targetId]?.name || 'Unnamed'
-                  }`}
+                  `${locations[c.sourceId]?.name || 'Unnamed'} → ${locations[c.targetId]?.name || 'Unnamed'}`}
               </span>
             </button>
           </li>
@@ -1353,6 +1062,7 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
 }
 
 /* --------------------------------------------------- Multiple rooms form */
+
 function MultiInspector({ ids }: { ids: string[] }) {
   const locations = useGraphStore((s) => s.locations);
   const groups = useGraphStore((s) => s.groups);
@@ -1363,10 +1073,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
   const deleteLocations = useGraphStore((s) => s.deleteLocations);
   const selectLocation = useGraphStore((s) => s.selectLocation);
 
-  const members = useMemo(
-    () => ids.map((id) => locations[id]).filter(Boolean) as Location[],
-    [ids, locations]
-  );
+  const members = useMemo(() => ids.map((id) => locations[id]).filter(Boolean) as Location[], [ids, locations]);
 
   const [shape, setShape] = useState('__keep__');
   const [groupId, setGroupId] = useState('__keep__');
@@ -1375,10 +1082,16 @@ function MultiInspector({ ids }: { ids: string[] }) {
   const [fill, setFill] = useState('#ffffff');
   const [changeText, setChangeText] = useState(false);
   const [textColor, setTextColor] = useState(PALETTE.nodeText);
+  const [changeSize, setChangeSize] = useState(false);
+  const [size, setSize] = useState(1);
 
   /* mirror the form so the commit closure always sees the latest values */
-  const formRef = useRef({ shape, groupId, visited, changeFill, fill, changeText, textColor });
-  formRef.current = { shape, groupId, visited, changeFill, fill, changeText, textColor };
+  const formRef = useRef({
+    shape, groupId, visited, changeFill, fill, changeText, textColor, changeSize, size
+  });
+  formRef.current = {
+    shape, groupId, visited, changeFill, fill, changeText, textColor, changeSize, size
+  };
   const idsRef = useRef(ids);
   idsRef.current = ids;
   const skipRef = useRef(false);
@@ -1389,6 +1102,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
     if (f.visited !== '__keep__') patch.visited = f.visited === 'yes';
     if (f.changeFill) patch.color = f.fill;
     if (f.changeText) patch.textColor = f.textColor;
+    if (f.changeSize) patch.size = f.size;
     if (f.groupId !== '__keep__' && f.groupId !== '__new__') {
       patch.groupId = f.groupId === '' ? null : f.groupId;
     }
@@ -1401,6 +1115,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
     setVisited('__keep__');
     setChangeFill(false);
     setChangeText(false);
+    setChangeSize(false);
   };
 
   /** Apply everything that was actually changed, then go back to "Keep Current". */
@@ -1418,7 +1133,8 @@ function MultiInspector({ ids }: { ids: string[] }) {
       groupId: '__keep__',
       visited: '__keep__',
       changeFill: false,
-      changeText: false
+      changeText: false,
+      changeSize: false
     };
     reset();
 
@@ -1435,11 +1151,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
     };
   }, [commit]);
 
-  const groupList = useMemo(
-    () => Object.values(groups).sort((a, b) => (a.name || '').localeCompare(b.name || '')),
-    [groups]
-  );
-
+  const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
   const hasChanges = Object.keys(patchFrom(formRef.current)).length > 0 || groupId === '__new__';
 
   return (
@@ -1460,8 +1172,8 @@ function MultiInspector({ ids }: { ids: string[] }) {
       </div>
 
       <p className="muted small">
-        Changes Below Are Applied To Every Selected Room When You Press Apply Or Click
-        Away. Fields That Must Be Unique Per Room Are Disabled.
+        Changes Below Are Applied To Every Selected Room When You Press Apply Or Click Away. Fields That Must Be
+        Unique Per Room Are Disabled.
       </p>
 
       <label className="disabled-field">
@@ -1482,6 +1194,28 @@ function MultiInspector({ ids }: { ids: string[] }) {
           ))}
         </select>
       </label>
+
+      <InlineCheckField label="Change Size" checked={changeSize} onChange={setChangeSize} />
+      {changeSize && (
+        <div className="color-row">
+          <input
+            type="number"
+            min={0.1}
+            max={MAX_SIZE}
+            step={0.1}
+            value={size}
+            onChange={(e) => setSize((prev) => parseSize(e.target.value, prev))}
+          />
+          <button
+            onClick={() => {
+              setChangeSize(false);
+              void bulkUpdateLocations(idsRef.current, { size: 1 });
+            }}
+          >
+            Reset To Normal
+          </button>
+        </div>
+      )}
 
       <div className="field">
         <span className="field-label">Grouping</span>
@@ -1561,8 +1295,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
             <button className="link" onClick={() => selectLocation(l.id)}>
               <span className="hit-title">{l.name || 'Unnamed Location'}</span>
               <span className="muted small">
-                {[l.layer, l.groupId ? groups[l.groupId]?.name : null].filter(Boolean).join(' · ') ||
-                  'No Layer'}
+                {[l.layer, l.groupId ? groups[l.groupId]?.name : null].filter(Boolean).join(' · ') || 'No Layer'}
               </span>
             </button>
           </li>
@@ -1573,6 +1306,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
 }
 
 /* --------------------------------------------------------------- container */
+
 export default function DetailsPanel() {
   const selection = useGraphStore((s) => s.selection);
   const multiSelect = useGraphStore((s) => s.multiSelect);
@@ -1581,6 +1315,7 @@ export default function DetailsPanel() {
   const groups = useGraphStore((s) => s.groups);
   const locationLabels = useGraphStore((s) => s.locationLabels);
   const connectionLabels = useGraphStore((s) => s.connectionLabels);
+
   const asideRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -1609,6 +1344,7 @@ export default function DetailsPanel() {
   const group = selection.type === 'group' ? groups[selection.id] : undefined;
   const locLabel = selection.type === 'location-label' ? locationLabels[selection.id] : undefined;
   const connLabel = selection.type === 'connection-label' ? connectionLabels[selection.id] : undefined;
+
   if (!location && !connection && !group && !locLabel && !connLabel) return null;
 
   return (

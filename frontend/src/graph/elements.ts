@@ -1,6 +1,8 @@
 import type { ElementDefinition } from 'cytoscape';
 import type { Connection, Group, Location } from '../types';
+import { isEffectivelyLocked } from './connectionRules';
 import { formatCoordinates } from './coordinateLayout';
+import { buildGroupTree, flattenGroupTree, renderableGroupIds } from './groups';
 import {
   EDGE_LABEL_FONT,
   NODE_LABEL_FONT,
@@ -12,17 +14,13 @@ import {
   wrapLabel
 } from './measure';
 import {
+  GROUP_OPACITY,
   PALETTE,
   effectiveLineStyle,
   normaliseShape,
   shapeMetrics,
   weightToWidth
 } from './model';
-import { buildGroupTree, flattenGroupTree, renderableGroupIds } from './groups';
-import { isEffectivelyLocked } from './connectionRules';
-
-/* shared with the planner so rendering and routing can never disagree */
-export { isEffectivelyLocked };
 
 export type LabelMode = 'names' | 'all' | 'none';
 
@@ -41,8 +39,9 @@ export const groupNodeId = (groupId: string) => `grp:${groupId}`;
 /** Ids we create transiently for ghosts / drag handles — never persisted. */
 export const isInternalId = (id: string) => id.startsWith('__');
 
-export const portalNodeId = (connectionId: string, side: 'out' | 'in') =>
-  `${connectionId}::${side}`;
+export const portalNodeId = (connectionId: string, side: 'out' | 'in') => `${connectionId}::${side}`;
+export const portalEdgeId = (connectionId: string, side: 'out' | 'in') =>
+  `${portalNodeId(connectionId, side)}-edge`;
 
 /** `<uuid>::out` / `<uuid>::in` -> parts. Stub *edges* (`::out-edge`) never match. */
 export function parsePortalId(id: string): { connectionId: string; side: 'out' | 'in' } | null {
@@ -51,6 +50,10 @@ export function parsePortalId(id: string): { connectionId: string; side: 'out' |
 }
 
 const MAX_LABEL_WIDTH = 170;
+
+/** A location's box scalar; anything invalid falls back to "normal". */
+const sizeOf = (l: Location) => (Number.isFinite(l.size) && l.size > 0 ? l.size : 1);
+const prettyNumber = (n: number) => String(Math.round(n * 100) / 100);
 
 export function describeLock(conn: Connection, locations: Record<string, Location>): string {
   if (!conn.locked) return '';
@@ -61,15 +64,20 @@ export function describeLock(conn: Connection, locations: Record<string, Locatio
 
 const safeName = (l: Location | undefined) => (l?.name && l.name.trim()) || 'Unnamed';
 
-/** Size a node so the label fits *inside* the shape, not just its bounding box. */
-function boxFor(label: string, shape: string, font: string, lineHeight: number) {
+/**
+ * Size a node so the label fits *inside* the shape, not just its bounding box.
+ * `scale` is the location's size scalar: it multiplies the drawn box here, and
+ * the text-side properties are multiplied by the same amount when their
+ * zoom-compensated twins are computed (see `viewScale`).
+ */
+function boxFor(label: string, shape: string, font: string, lineHeight: number, scale = 1) {
   const lines = label ? label.split('\n') : [];
   const textW = lines.reduce((max, line) => Math.max(max, measureTextWidth(line, font)), 0);
   const textH = Math.max(lines.length, 1) * lineHeight;
   const m = shapeMetrics(shape);
   return {
-    w: Math.max(48, Math.round(textW * m.wFactor + m.padX)),
-    h: Math.max(34, Math.round(textH * m.hFactor + m.padY)),
+    w: Math.max(48, Math.round(textW * m.wFactor + m.padX)) * scale,
+    h: Math.max(34, Math.round(textH * m.hFactor + m.padY)) * scale,
     /* keep Cytoscape from re-wrapping differently than we measured */
     textMaxWidth: Math.max(24, Math.ceil(textW) + 6),
     textMarginY: m.textMarginY ?? 0
@@ -95,16 +103,16 @@ export function buildElements(
   for (const l of locations) {
     if (l.groupId) memberCount.set(l.groupId, (memberCount.get(l.groupId) ?? 0) + 1);
   }
+
   /* a grouping is drawn when it — or anything nested in it — holds a room */
   const visible = renderableGroupIds(groups, memberCount);
   const liveGroups = new Map(groups.filter((g) => visible.has(g.id)).map((g) => [g.id, g]));
+
   const parentOf = (l: Location | undefined) =>
     l?.groupId && liveGroups.has(l.groupId) ? groupNodeId(l.groupId) : undefined;
 
   /* parents must be added before their children (compound nesting on add) */
-  const orderedGroups = flattenGroupTree(buildGroupTree([...liveGroups.values()])).map(
-    (n) => n.group
-  );
+  const orderedGroups = flattenGroupTree(buildGroupTree([...liveGroups.values()])).map((n) => n.group);
 
   const positionOf = (l: Location | undefined) => {
     if (!l) return undefined;
@@ -127,6 +135,11 @@ export function buildElements(
         /* the title falls back to the body colour until it is given its own */
         textColor: g.textColor || g.color || PALETTE.groupBorder,
         memberCount: memberCount.get(g.id) ?? 0,
+        /* neutral defaults; the layering pass refines them after every
+           arrangement (see graph/layering) */
+        zLayer: 1,
+        groupFillOpacity: GROUP_OPACITY.fill,
+        groupBorderOpacity: GROUP_OPACITY.border,
         /* sub-groupings are simply compound children of their parent */
         parent: g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined
       },
@@ -140,8 +153,9 @@ export function buildElements(
   for (const l of locations) {
     const hasNotes = l.notes.trim().length > 0;
     const shape = normaliseShape(l.kind);
-
+    const size = sizeOf(l);
     const lines = showLabels ? wrapLabel(l.name || 'Unnamed Location', MAX_LABEL_WIDTH) : [];
+
     if (showLabels && opts.labelMode === 'all') {
       const labelNames = (l.labelIds ?? [])
         .map((id) => opts.locationLabelNames?.[id])
@@ -150,6 +164,7 @@ export function buildElements(
       const badges = [
         formatCoordinates(l),
         l.layer ? `«${l.layer}»` : '',
+        size !== 1 ? `×${prettyNumber(size)}` : '',
         labelNames ? `#${labelNames}` : '',
         hasNotes ? '📝' : ''
       ]
@@ -157,8 +172,9 @@ export function buildElements(
         .join(' ');
       if (badges) lines.push(badges);
     }
+
     const label = lines.join('\n');
-    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT);
+    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size);
 
     nodes.push({
       data: {
@@ -168,21 +184,19 @@ export function buildElements(
         name: l.name,
         layer: l.layer,
         shape,
+        size,
         ...box,
         fill: l.color || (l.visited ? PALETTE.nodeFillVisited : PALETTE.nodeFill),
         border: l.visited ? PALETTE.nodeBorderVisited : PALETTE.nodeBorder,
         textColor: l.textColor || PALETTE.nodeText,
         visited: l.visited,
         hasNotes,
+        /* refined by the layering pass right after every arrangement */
+        zLayer: 0,
         parent: parentOf(l)
       },
       position: positionOf(l),
-      classes: [
-        'location',
-        l.visited ? 'visited' : 'unvisited',
-        hasNotes ? 'has-notes' : '',
-        l.pinned ? 'pinned' : ''
-      ]
+      classes: ['location', l.visited ? 'visited' : 'unvisited', hasNotes ? 'has-notes' : '']
         .filter(Boolean)
         .join(' ')
     });
@@ -224,12 +238,7 @@ export function buildElements(
 
     const decorate = (text: string) =>
       showLabels
-        ? [
-            locked ? '🔒' : '',
-            opts.labelMode === 'all' && hasNotes ? '📝' : '',
-            text,
-            connLabelNames
-          ]
+        ? [locked ? '🔒' : '', opts.labelMode === 'all' && hasNotes ? '📝' : '', text, connLabelNames]
             .filter(Boolean)
             .join(' ')
         : '';
@@ -253,8 +262,7 @@ export function buildElements(
     /* ephemeral: two detached stubs instead of one long line */
     const src = byId.get(c.sourceId);
     const tgt = byId.get(c.targetId);
-    const glyph =
-      c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
+    const glyph = c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
     const suffix = c.name ? ` (${c.name})` : '';
     const srcPos = positionOf(src);
     const tgtPos = positionOf(tgt);
@@ -290,9 +298,10 @@ export function buildElements(
     nodes.push({
       data: {
         ...shared,
-        id: `${c.id}::out`,
+        id: portalNodeId(c.id, 'out'),
         portalSide: 'out',
         anchorId: c.sourceId,
+        zLayer: 0,
         ...outStub.offset,
         shape: 'tag',
         parent: parentOf(src),
@@ -306,9 +315,10 @@ export function buildElements(
     nodes.push({
       data: {
         ...shared,
-        id: `${c.id}::in`,
+        id: portalNodeId(c.id, 'in'),
         portalSide: 'in',
         anchorId: c.targetId,
+        zLayer: 0,
         ...inStub.offset,
         shape: 'tag',
         parent: parentOf(tgt),
@@ -322,9 +332,9 @@ export function buildElements(
     edges.push({
       data: {
         ...shared,
-        id: `${c.id}::out-edge`,
+        id: portalEdgeId(c.id, 'out'),
         source: c.sourceId,
-        target: `${c.id}::out`,
+        target: portalNodeId(c.id, 'out'),
         label: '',
         labelWidth: 0
       },
@@ -334,8 +344,8 @@ export function buildElements(
     edges.push({
       data: {
         ...shared,
-        id: `${c.id}::in-edge`,
-        source: `${c.id}::in`,
+        id: portalEdgeId(c.id, 'in'),
+        source: portalNodeId(c.id, 'in'),
         target: c.targetId,
         label: '',
         labelWidth: 0
