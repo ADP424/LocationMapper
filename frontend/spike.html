@@ -107,7 +107,9 @@
             <option value="144">144</option>
             <option value="256" selected>256 — 256 blocks across</option>
             <option value="576">576</option>
-            <option value="1024">1024 — one full region</option>
+            <option value="1024">1024 — 512 blocks across</option>
+            <option value="2048">2048 — heavy</option>
+            <option value="4096">4096 — will likely stall</option>
           </select>
         </div>
         <div class="field">
@@ -115,6 +117,7 @@
           <select id="centre"></select>
         </div>
         <button id="load" class="primary">Load area</button>
+        <p class="note">click any block to recentre there · <kbd>R</kbd> reloads around the view</p>
       </div>
 
       <div id="status"></div>

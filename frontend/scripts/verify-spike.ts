@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises';
 
 import { unknownBlockNames } from '../src/world/anvil/blocks';
+import { meshWorld } from '../src/world/mesh/faces';
 import { writeRegion } from '../src/world/anvil/testkit/regionWrite';
 import { synthesiseChunks } from '../src/world/anvil/testkit/syntheticWorld';
 import { loadRegion, scanExposed, scanExposedPadded } from '../src/world/spike/scan';
@@ -122,26 +123,51 @@ if (loaded.world.list.length <= 200) {
 
 /* -------------------------------------------------------------- geometry */
 
+heading('Face meshing');
+const mesh = meshWorld(loaded.world);
+
+row('faces emitted', n(mesh.faces), `${n(mesh.faces * 2)} triangles`);
+row('mesh time', `${mesh.ms.toFixed(0)} ms`, `${(mesh.ms / loaded.world.list.length).toFixed(2)} ms/chunk`);
+row('blocks visited', n(mesh.blocksScanned), `${pct(mesh.blocksScanned, scan.blocksScanned)} of a full scan`);
+
+const vertexBytes =
+  (mesh.opaque?.positions.byteLength ?? 0) +
+  (mesh.opaque?.colors.byteLength ?? 0) +
+  (mesh.translucent?.positions.byteLength ?? 0) +
+  (mesh.translucent?.colors.byteLength ?? 0);
+row(
+  'vertex data',
+  `${(vertexBytes / 1024 / 1024).toFixed(1)} MB`,
+  `${(vertexBytes / Math.max(1, mesh.faces)).toFixed(0)} B/face`
+);
+
+/* The mesher must emit exactly the faces the reference scan counted. If these
+   ever disagree, the mesher is dropping or duplicating geometry. */
+const facesAgree = mesh.faces === scan.exposedFaces;
+console.log(
+  facesAgree
+    ? `  \x1b[32mface count matches the reference scan exactly (${n(mesh.faces)})\x1b[0m`
+    : `  \x1b[31mMISMATCH\x1b[0m mesher ${n(mesh.faces)} vs scan ${n(scan.exposedFaces)}`
+);
+if (!facesAgree) process.exitCode = 1;
+
 heading('Geometry cost');
 const naiveTris = scan.naiveFaces * 2;
-const culledTris = scan.exposedFaces * 2;
 
-row('naive cube faces', n(scan.naiveFaces), `${n(naiveTris)} triangles`);
-row('face-culled', n(scan.exposedFaces), `${n(culledTris)} triangles`);
-row('culling saves', pct(scan.naiveFaces - scan.exposedFaces, scan.naiveFaces), 'before any greedy merging');
+row('naive cubes', n(scan.naiveFaces), `${n(naiveTris)} triangles`);
+row('face-culled', n(mesh.faces), `${n(mesh.faces * 2)} triangles`);
+row('culling saves', pct(scan.naiveFaces - mesh.faces, scan.naiveFaces), 'before any greedy merging');
 
 const areaChunks = loaded.world.list.length;
-const perChunkFaces = scan.exposedFaces / Math.max(1, areaChunks);
+const perChunkFaces = mesh.faces / Math.max(1, areaChunks);
+const bytesPerChunk = vertexBytes / Math.max(1, areaChunks);
 row('faces per chunk', n(Math.round(perChunkFaces)));
 
-/* A render distance of 12 is ~625 chunk columns. */
-for (const distance of [8, 12, 16]) {
-  const columns = (distance * 2 + 1) ** 2;
-  const tris = perChunkFaces * columns * 2;
+for (const chunks of [256, 1024, 4096]) {
   row(
-    `projected at R=${distance}`,
-    `${(tris / 1e6).toFixed(1)}M tris`,
-    `${n(columns)} columns, ${((tris * 32) / 8 / 1024 / 1024).toFixed(0)} MB of vertex data`
+    `projected at ${n(chunks)} chunks`,
+    `${((perChunkFaces * chunks * 2) / 1e6).toFixed(1)}M tris`,
+    `${((bytesPerChunk * chunks) / 1024 / 1024).toFixed(0)} MB of vertex data`
   );
 }
 

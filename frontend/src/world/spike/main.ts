@@ -18,6 +18,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { unknownBlockNames } from '../anvil/blocks';
 import type { ParsedChunk } from '../anvil/chunk';
 import { AnvilError } from '../anvil/errors';
+import { meshWorld, type FaceBuffers } from '../mesh/faces';
 import { writeRegion } from '../anvil/testkit/regionWrite';
 import { synthesiseChunks } from '../anvil/testkit/syntheticWorld';
 import { loadArea } from '../source/area';
@@ -29,7 +30,7 @@ import {
   type DimensionRef,
   type WorldSource
 } from '../source/worldSource';
-import { loadRegion, scanExposedPadded, World, type ScanResult } from './scan';
+import { loadRegion, World } from './scan';
 
 const SYNTHETIC_CHUNKS = 8;
 /** Cap for the single-file path, where there is no budget control. */
@@ -60,45 +61,42 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8fb8de);
 scene.fog = new THREE.Fog(0x8fb8de, 260, 900);
 
-/* Stands in for the fixed per-face tints the real mesher will bake into vertex
-   colours: key light from above-ish, strong ambient so nothing goes black. */
-const sun = new THREE.DirectionalLight(0xffffff, 1.7);
-sun.position.set(0.6, 1, 0.35);
-scene.add(sun, new THREE.AmbientLight(0xffffff, 1.25));
+/* No lights: the mesher bakes a fixed per-face tint into vertex colours, so a
+   MeshBasicMaterial already draws the shading. */
 
-const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 4000);
+const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 8000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
+type WorldMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 
-/** Narrower than three's default generics so `.material.dispose()` typechecks. */
-type CubeMesh = THREE.InstancedMesh<THREE.BoxGeometry, THREE.MeshLambertMaterial>;
+/**
+ * Turn the mesher's buffers into a drawable mesh.
+ *
+ * Positions are Int16 straight from the mesher — WebGL takes SHORT attributes
+ * natively, so there is no conversion pass. Colours are unsigned bytes flagged
+ * normalized, which three maps back to 0..1 on the GPU.
+ */
+function toMesh(buffers: FaceBuffers | null, opaque: boolean): WorldMesh | null {
+  if (!buffers) return null;
 
-/** One InstancedMesh per pass: opaque blocks, then translucent ones. */
-function buildMeshes(scan: ScanResult): CubeMesh[] {
-  const matrix = new THREE.Matrix4();
-  const color = new THREE.Color();
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Int16BufferAttribute(buffers.positions, 3));
+  geometry.setAttribute('color', new THREE.Uint8BufferAttribute(buffers.colors, 3, true));
+  geometry.computeBoundingSphere();
 
-  const build = (opaque: boolean): CubeMesh | null => {
-    const subset = scan.blocks.filter((b) => b.opaque === opaque);
-    if (subset.length === 0) return null;
+  const material = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    /* Double-sided as insurance: a winding mistake would otherwise show up as
+       invisible geometry, which is a miserable thing to debug. Faces are only
+       emitted where they touch open space, so nothing is drawn twice. */
+    side: THREE.DoubleSide,
+    ...(opaque ? {} : { transparent: true, opacity: 0.72, depthWrite: false })
+  });
 
-    const material = new THREE.MeshLambertMaterial(
-      opaque ? {} : { transparent: true, opacity: 0.65, depthWrite: false }
-    );
-    const mesh = new THREE.InstancedMesh(cubeGeometry, material, subset.length);
-    subset.forEach((b, i) => {
-      matrix.setPosition(b.x + 0.5, b.y + 0.5, b.z + 0.5);
-      mesh.setMatrixAt(i, matrix);
-      mesh.setColorAt(i, color.setHex(b.color));
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    return mesh;
-  };
-
-  return [build(true), build(false)].filter((m): m is CubeMesh => m !== null);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = opaque ? 0 : 1;
+  return mesh;
 }
 
 function resize() {
@@ -117,14 +115,19 @@ function resize() {
   camera.updateProjectionMatrix();
 }
 
-let current: CubeMesh[] = [];
+let current: WorldMesh[] = [];
 
-function show(world: World, meshes: CubeMesh[], lookAtY = 70) {
+function clearMeshes() {
   for (const o of current) {
     scene.remove(o);
     o.material.dispose();
-    o.dispose();
+    o.geometry.dispose();
   }
+  current = [];
+}
+
+function show(world: World, meshes: WorldMesh[], lookAtY = 70) {
+  clearMeshes();
   current = meshes;
   for (const m of meshes) scene.add(m);
 
@@ -133,9 +136,9 @@ function show(world: World, meshes: CubeMesh[], lookAtY = 70) {
   const span = Math.max(world.maxX - world.minX, world.maxZ - world.minZ, 64);
   controls.target.set(cx, lookAtY, cz);
   camera.position.set(cx + span * 0.7, lookAtY + span * 0.55, cz + span * 0.7);
-  camera.far = Math.max(2000, span * 6);
+  camera.far = Math.max(2000, span * 8);
   camera.updateProjectionMatrix();
-  scene.fog = new THREE.Fog(0x8fb8de, span * 0.8, span * 2.6);
+  scene.fog = new THREE.Fog(0x8fb8de, span * 0.9, span * 3.2);
   controls.update();
 }
 
@@ -175,26 +178,38 @@ const PATH_KEY = 'anvil-spike-world-path';
 
 /* ----------------------------------------------------------- render step */
 
-/** Scan a set of chunks, build geometry, frame it. Shared by every load path. */
+/** Mesh a set of chunks, build geometry, frame it. Shared by every load path. */
 function render(chunks: ParsedChunk[], extraRows: Array<[string, string, boolean?]>, centreY = 70) {
   const world = new World();
   for (const c of chunks) world.add(c);
 
-  const scan = scanExposedPadded(world);
+  /* Drop the previous geometry before building the next: at these sizes,
+     holding two worlds at once is what actually runs the tab out of memory. */
+  clearMeshes();
+
+  const mesh = meshWorld(world);
   const t = performance.now();
-  const meshes = buildMeshes(scan);
+  const meshes = [toMesh(mesh.opaque, true), toMesh(mesh.translucent, false)].filter(
+    (m): m is WorldMesh => m !== null
+  );
   const uploadMs = performance.now() - t;
 
   show(world, meshes, centreY);
   renderer.render(scene, camera);
 
+  const vertexBytes =
+    (mesh.opaque?.positions.byteLength ?? 0) +
+    (mesh.opaque?.colors.byteLength ?? 0) +
+    (mesh.translucent?.positions.byteLength ?? 0) +
+    (mesh.translucent?.colors.byteLength ?? 0);
+
   report([
     ...extraRows,
-    ['blocks scanned', n(scan.blocksScanned)],
-    ['solid', n(scan.solid)],
-    ['buried (culled)', `${((scan.buried / Math.max(1, scan.solid)) * 100).toFixed(1)}%`],
-    ['cube instances', n(scan.blocks.length)],
-    ['exposure scan', `${scan.ms.toFixed(0)} ms`],
+    ['blocks visited', n(mesh.blocksScanned)],
+    ['solid', n(mesh.solid)],
+    ['faces', n(mesh.faces)],
+    ['vertex data', `${(vertexBytes / 1024 / 1024).toFixed(1)} MB`],
+    ['meshing', `${mesh.ms.toFixed(0)} ms`],
     ['geometry upload', `${uploadMs.toFixed(0)} ms`],
     ['draw calls', String(renderer.info.render.calls)],
     ['triangles', n(renderer.info.render.triangles)]
@@ -304,10 +319,16 @@ async function openSource(load: () => Promise<WorldSource>) {
   }
 }
 
-async function loadSelectedArea() {
+/** Last thing loaded, so recentring does not need the dropdowns re-read. */
+let lastDimension: DimensionRef | null = null;
+
+async function loadAreaAt(x: number, z: number, y: number) {
   if (!source) return;
-  const dimension = source.dimensions[dimSelect.selectedIndex];
-  const centre = centresFor(dimension)[centreSelect.selectedIndex] ?? { x: 0, z: 0, y: 70 };
+  const dimension = lastDimension ?? source.dimensions[dimSelect.selectedIndex];
+  if (!dimension) return;
+  lastDimension = dimension;
+
+  const centre = { x: Math.round(x), z: Math.round(z), y: Math.round(y), label: '' };
   const budget = Number(budgetSelect.value);
 
   errEl.textContent = '';
@@ -353,6 +374,57 @@ async function loadSelectedArea() {
     busy(false);
   }
 }
+
+function loadSelectedArea() {
+  if (!source) return;
+  const dimension = source.dimensions[dimSelect.selectedIndex];
+  if (!dimension) return;
+  lastDimension = dimension;
+  const centre = centresFor(dimension)[centreSelect.selectedIndex] ?? { x: 0, z: 0, y: 70 };
+  void loadAreaAt(centre.x, centre.z, centre.y);
+}
+
+/* ------------------------------------------------------------- navigation */
+
+/**
+ * Click a block to reload the area centred there.
+ *
+ * Distinguished from an orbit drag by how far the pointer moved: OrbitControls
+ * owns the drag, and stealing it would make the view unusable.
+ */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+let pressAt: { x: number; y: number } | null = null;
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button === 0) pressAt = { x: e.clientX, y: e.clientY };
+});
+
+canvas.addEventListener('pointerup', (e) => {
+  if (e.button !== 0 || !pressAt) return;
+  const moved = Math.hypot(e.clientX - pressAt.x, e.clientY - pressAt.y);
+  pressAt = null;
+  if (moved > 4 || current.length === 0 || !source) return;
+
+  const rect = canvas.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  const hit = raycaster.intersectObjects(current, false)[0];
+  if (!hit) return;
+
+  status(`recentring on ${Math.round(hit.point.x)}, ${Math.round(hit.point.z)}…`);
+  void loadAreaAt(hit.point.x, hit.point.z, hit.point.y);
+});
+
+/** R reloads around wherever the camera is looking. */
+window.addEventListener('keydown', (e) => {
+  const typing = (e.target as HTMLElement)?.tagName === 'INPUT';
+  if (typing || e.key.toLowerCase() !== 'r' || !source || loadButton.disabled) return;
+  const t = controls.target;
+  void loadAreaAt(t.x, t.z, t.y);
+});
 
 /* ------------------------------------------------------- single file paths */
 
@@ -425,7 +497,7 @@ if (canPickDirectory()) {
 }
 
 dimSelect.addEventListener('change', refreshCentres);
-loadButton.addEventListener('click', () => void loadSelectedArea());
+loadButton.addEventListener('click', loadSelectedArea);
 document.getElementById('synth')!.addEventListener('click', () => void loadSynthetic());
 
 document.getElementById('dirfile')!.addEventListener('change', (ev) => {
