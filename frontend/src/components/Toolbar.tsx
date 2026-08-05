@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { cyHolder } from '../graph/cyHolder';
+import { fitGraph } from '../graph/cyHolder';
 import type { LabelMode } from '../graph/elements';
 import { LAYOUT_GROUPS, LAYOUT_LABELS, LayoutName } from '../graph/layouts';
 import { DIRECTION_OPTIONS, type Direction } from '../graph/model';
@@ -99,7 +99,7 @@ export default function Toolbar() {
         <button disabled={disabled || busy} onClick={runLayout}>
           Re-Layout
         </button>
-        <button disabled={disabled} onClick={() => cyHolder.cy?.fit(undefined, 60)}>
+        <button disabled={disabled} onClick={() => fitGraph()}>
           Fit
         </button>
       </div>

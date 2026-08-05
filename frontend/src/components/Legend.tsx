@@ -1,4 +1,14 @@
+import { useGraphStore } from '../state/store';
+
+const GROUPING_HINT = {
+  always: 'Grouping (Drag To Move Everything Inside)',
+  selected: 'Grouping (Select It, Then Drag To Move Everything Inside)',
+  never: 'Grouping (Drag Over It To Pan)'
+} as const;
+
 export default function Legend() {
+  const groupDrag = useGraphStore((s) => s.settings.groupDrag);
+
   return (
     <section className="panel legend">
       <h2>Legend</h2>
@@ -6,7 +16,7 @@ export default function Legend() {
         <li><span className="swatch node" /> Location</li>
         <li><span className="swatch node visited" /> Visited Location</li>
         <li><span className="swatch node notes" /> Has Notes (Double Border)</li>
-        <li><span className="swatch group" /> Grouping (Drag To Move Everything Inside)</li>
+        <li><span className="swatch group" /> {GROUPING_HINT[groupDrag]}</li>
         <li><span className="swatch edge" /> Connection (Thickness = Weight)</li>
         <li><span className="swatch edge dashed" /> Ephemeral Or Locked (Default Style Only)</li>
         <li>🔒 Locked Connection · 📝 Has Notes</li>
@@ -17,8 +27,8 @@ export default function Legend() {
         A Connection With No Arrowheads Is Undirected: The Trip Planner Walks It Both Ways.
       </p>
       <p className="muted small">
-        Right-Click Empty Space And Drag To Select Many Rooms. Right-Click Without
-        Dragging For The Menu.
+        Right-Click Empty Space Or A Grouping And Drag To Select Many Rooms. Right-Click
+        Without Dragging For The Menu.
       </p>
     </section>
   );

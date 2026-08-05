@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { cyHolder } from '../graph/cyHolder';
+import { drawnExtentAt, drawnExtentModel, type ExtentModel } from '../graph/extent';
+import { viewScaleFactor } from '../graph/viewScale';
+import { useGraphStore } from '../state/store';
 
 interface Bar {
   /** thumb length as a fraction of the track */
@@ -14,21 +17,42 @@ const EMPTY: Bar = { size: 1, offset: 0, visible: false };
 /** Breathing room past the content on each side, as a fraction of the viewport. */
 const EDGE_PAD = 1 / 16;
 
+/** Re-measuring the whole graph is O(elements), so the content box is cached. */
+const CONTENT_THROTTLE_MS = 150;
+
+/** Sub-pixel changes must not re-render React every animation frame. */
+const settled = (a: Bar, b: Bar) =>
+  a.visible === b.visible && Math.abs(a.size - b.size) < 0.002 && Math.abs(a.offset - b.offset) < 0.002;
+
 export default function GraphScrollbars() {
+  const settings = useGraphStore((s) => s.settings);
   const [hBar, setHBar] = useState<Bar>(EMPTY);
   const [vBar, setVBar] = useState<Bar>(EMPTY);
   /** union of content + viewport — used only to map pixels ↔ model for display */
   const rangeRef = useRef({ x1: 0, x2: 1, y1: 0, y2: 1 });
+  /**
+   * An affine model of the drawn extent, rebuilt only when elements move. Under
+   * compensation the content grows as you zoom out, so the track is evaluated at
+   * the current factor — one multiply, not a bounding-box walk.
+   */
+  const modelRef = useRef<ExtentModel | null>(null);
 
   useEffect(() => {
     const cy = cyHolder.cy;
     if (!cy) return;
+
     let frame = 0;
+    let contentTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const readContent = () => {
+      modelRef.current = drawnExtentModel(cy, settings.baseScale, settings);
+    };
 
     const update = () => {
       frame = 0;
       const ext = cy.extent();
-      const bb = cy.elements().nonempty() ? cy.elements().boundingBox() : ext;
+      const m = modelRef.current;
+      const bb = m ? drawnExtentAt(m, viewScaleFactor(cy.zoom(), settings)) : ext;
 
       /* track = content plus a margin, stretched only as far as the viewport
          has wandered beyond it */
@@ -43,32 +67,49 @@ export default function GraphScrollbars() {
       const totalW = Math.max(1, x2 - x1);
       const totalH = Math.max(1, y2 - y1);
 
-      setHBar({
-        size: Math.min(1, ext.w / totalW),
-        offset: (ext.x1 - x1) / totalW,
-        visible: ext.w < totalW - 1
-      });
-      setVBar({
-        size: Math.min(1, ext.h / totalH),
-        offset: (ext.y1 - y1) / totalH,
-        visible: ext.h < totalH - 1
-      });
+      const next = {
+        h: {
+          size: Math.min(1, ext.w / totalW),
+          offset: (ext.x1 - x1) / totalW,
+          visible: ext.w < totalW - 1
+        },
+        v: {
+          size: Math.min(1, ext.h / totalH),
+          offset: (ext.y1 - y1) / totalH,
+          visible: ext.h < totalH - 1
+        }
+      };
+      setHBar((prev) => (settled(prev, next.h) ? prev : next.h));
+      setVBar((prev) => (settled(prev, next.v) ? prev : next.v));
     };
 
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(update);
     };
 
+    /* elements moving is common (drags, layouts) and measuring is the expensive
+       part, so it is throttled rather than run per event */
+    const remeasure = () => {
+      if (contentTimer) return;
+      contentTimer = setTimeout(() => {
+        contentTimer = null;
+        readContent();
+        schedule();
+      }, CONTENT_THROTTLE_MS);
+    };
+
+    readContent();
     cy.on('viewport', schedule);
-    cy.on('add remove position style', schedule);
+    cy.on('add remove position mapgraphgeometry', remeasure);
     schedule();
 
     return () => {
       cy.off('viewport', schedule);
-      cy.off('add remove position style', schedule);
+      cy.off('add remove position mapgraphgeometry', remeasure);
       if (frame) cancelAnimationFrame(frame);
+      if (contentTimer) clearTimeout(contentTimer);
     };
-  }, []);
+  }, [settings]);
 
   /** Put the given model coordinate at the viewport's leading edge. */
   const panTo = (axis: 'x' | 'y', edge: number) => {
@@ -83,8 +124,9 @@ export default function GraphScrollbars() {
   /** Content bounds + viewport span on one axis, captured at interaction time. */
   const axisInfo = (axis: 'x' | 'y') => {
     const cy = cyHolder.cy!;
-    const bb = cy.elements().nonempty() ? cy.elements().boundingBox() : cy.extent();
     const ext = cy.extent();
+    const m = modelRef.current;
+    const bb = m ? drawnExtentAt(m, viewScaleFactor(cy.zoom(), settings)) : ext;
     const span = axis === 'x' ? ext.w : ext.h;
     /* the same margin the track shows is also genuinely scrollable */
     const pad = span * EDGE_PAD;
@@ -92,8 +134,7 @@ export default function GraphScrollbars() {
     const cMax = (axis === 'x' ? bb.x2 : bb.y2) + pad;
     const startEdge = axis === 'x' ? ext.x1 : ext.y1;
     /* you can never scroll a viewport edge past the padded content edge */
-    const clamp = (edge: number) =>
-      Math.max(cMin, Math.min(cMax - span, edge));
+    const clamp = (edge: number) => Math.max(cMin, Math.min(cMax - span, edge));
     return { cMin, cMax, span, startEdge, scrollable: cMax - cMin > span + 0.5, clamp };
   };
 
@@ -102,7 +143,6 @@ export default function GraphScrollbars() {
     e.preventDefault();
     const cy = cyHolder.cy;
     if (!cy) return;
-
     const info = axisInfo(axis);
     if (!info.scrollable) return;
 

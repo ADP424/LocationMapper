@@ -447,9 +447,15 @@ export const useGraphStore = create<Store>()((set, get) => {
     setError: (error) => set({ error }),
 
     setSettings: (patch) => {
-      const next = normaliseSettings({ ...get().settings, ...patch });
+      const previous = get().settings;
+      const next = normaliseSettings({ ...previous, ...patch });
       saveSettings(next);
       set({ settings: next });
+      /* layouts space for the boxes they will draw, so the old positions are now
+         either too tight or too loose */
+      if (next.baseScale !== previous.baseScale) {
+        flash('Base Size Changed — Re-Layout To Respace The Map');
+      }
     },
     resetSettings: () => {
       saveSettings(DEFAULT_SETTINGS);

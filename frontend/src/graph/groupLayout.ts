@@ -34,7 +34,8 @@ function runLayoutAsync(cy: Core, options: any, timeoutMs = 20_000): Promise<voi
 
 async function layoutHeadless(
   elements: ElementDefinition[],
-  name: LayoutName
+  name: LayoutName,
+  baseScale: number
 ): Promise<Map<string, Pos>> {
   const positions = new Map<string, Pos>();
   const nodes = elements.filter((el) => !el.data?.source);
@@ -63,7 +64,8 @@ async function layoutHeadless(
        w/h, so both need the spacing terms computed here rather than globally */
     const metrics = computeMetrics(
       cy.edges().map((e) => (e.data('labelWidth') as number) ?? 0),
-      cy.nodes().map((n) => Math.max(Number(n.data('w')) || 0, Number(n.data('h')) || 0))
+      cy.nodes().map((n) => Math.max(Number(n.data('w')) || 0, Number(n.data('h')) || 0)),
+      baseScale
     );
 
     await runLayoutAsync(cy, {
@@ -117,7 +119,16 @@ const ROOT = '__root__';
  * Connections always stay room-to-room, and nothing outside a box can be
  * placed inside it — at any nesting depth.
  */
-export async function computeGroupedLayout(cy: Core, name: LayoutName): Promise<Map<string, Pos>> {
+export async function computeGroupedLayout(
+  cy: Core,
+  name: LayoutName,
+  baseScale = 1
+): Promise<Map<string, Pos>> {
+  /* the drawn grouping padding scales with the base size, so the quotient node
+     a parent lays out must grow with it too */
+  const padding = GROUP_PADDING * baseScale;
+  const labelRoom = LABEL_ROOM * baseScale;
+
   const realNodes = cy
     .nodes()
     .filter((n) => !n.hasClass('group') && !n.hasClass('ghost') && !n.hasClass('handle'));
@@ -220,7 +231,7 @@ export async function computeGroupedLayout(cy: Core, name: LayoutName): Promise<
       els.push({ data: { id: `m${i++}`, source: `u:${su}`, target: `u:${tu}`, labelWidth } });
     });
 
-    const placed = await layoutHeadless(els, name);
+    const placed = await layoutHeadless(els, name, baseScale);
     const box = bboxOf([...unitSize.keys()], placed, unitSize);
 
     const offsets = new Map<string, Pos>();
@@ -233,7 +244,7 @@ export async function computeGroupedLayout(cy: Core, name: LayoutName): Promise<
     });
 
     results.set(level ?? ROOT, {
-      size: { w: box.w + GROUP_PADDING * 2, h: box.h + GROUP_PADDING * 2 + LABEL_ROOM },
+      size: { w: box.w + padding * 2, h: box.h + padding * 2 + labelRoom },
       offsets
     });
   };

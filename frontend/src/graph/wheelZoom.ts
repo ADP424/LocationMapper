@@ -64,8 +64,14 @@ export function bindWheelZoom(interceptor: HTMLElement, cy: Core, opts: WheelZoo
     const delta = pixelDelta(event);
     if (!delta) return;
 
-    const level = cy.zoom() * Math.pow(10, (-delta / ZOOM_DIVISOR) * opts.sensitivity());
+    const current = cy.zoom();
+    const level = current * Math.pow(10, (-delta / ZOOM_DIVISOR) * opts.sensitivity());
     if (!Number.isFinite(level) || level <= 0) return;
+
+    /* `cy.zoom` clamps into the zoom range, and the floor moves with the map —
+       never let that clamp yank the view back in when we are already outside it */
+    if (level < current && current <= cy.minZoom()) return;
+    if (level > current && current >= cy.maxZoom()) return;
 
     /* zoom about the cursor, in the container's own rendered coordinates */
     const rect = (cy.container() ?? interceptor).getBoundingClientRect();

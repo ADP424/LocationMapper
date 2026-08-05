@@ -5,6 +5,7 @@ import { formatCoordinates } from './coordinateLayout';
 import { buildGroupTree, flattenGroupTree, renderableGroupIds } from './groups';
 import {
   EDGE_LABEL_FONT,
+  GROUP_LABEL_FONT,
   NODE_LABEL_FONT,
   NODE_LINE_HEIGHT,
   PORTAL_LABEL_FONT,
@@ -26,6 +27,8 @@ export type LabelMode = 'names' | 'all' | 'none';
 
 export interface BuildOptions {
   labelMode: LabelMode;
+  /** Global multiplier on every drawn size (`settings.baseScale`). */
+  baseScale: number;
   positionOverrides?: Record<string, { x: number; y: number }>;
   /** Pending (unsaved) stub offsets, keyed by portal node id. */
   portalOffsetOverrides?: Record<string, { dx: number; dy: number }>;
@@ -95,6 +98,8 @@ export function buildElements(
 
   const overrides = opts.positionOverrides ?? {};
   const offsetOverrides = opts.portalOffsetOverrides ?? {};
+  /* baked into the geometry, so every layout spaces the boxes it will draw */
+  const scale = Number.isFinite(opts.baseScale) && opts.baseScale > 0 ? opts.baseScale : 1;
   const visited = new Set(locations.filter((l) => l.visited).map((l) => l.id));
   const byId = new Map(locations.map((l) => [l.id, l]));
   const showLabels = opts.labelMode !== 'none';
@@ -135,6 +140,10 @@ export function buildElements(
         /* the title falls back to the body colour until it is given its own */
         textColor: g.textColor || g.color || PALETTE.groupBorder,
         memberCount: memberCount.get(g.id) ?? 0,
+        /* un-wrapped, so it feeds the label ceiling (see viewScale) */
+        labelWidth: showLabels
+          ? measureTextWidth(g.name || 'Unnamed Grouping', GROUP_LABEL_FONT) * scale
+          : 0,
         /* neutral defaults; the layering pass refines them after every
            arrangement (see graph/layering) */
         zLayer: 1,
@@ -144,7 +153,9 @@ export function buildElements(
         parent: g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined
       },
       classes: 'group',
-      selectable: true,
+      /* grouping selection lives in the store and is drawn with `hl-primary`;
+         Cytoscape's native selection would only add an overlay flicker */
+      selectable: false,
       grabbable: true
     });
   }
@@ -174,7 +185,7 @@ export function buildElements(
     }
 
     const label = lines.join('\n');
-    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size);
+    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size * scale);
 
     nodes.push({
       data: {
@@ -206,7 +217,7 @@ export function buildElements(
   for (const c of connections) {
     const locked = isEffectivelyLocked(c, visited);
     const hasNotes = c.notes.trim().length > 0;
-    const lineWidth = weightToWidth(c.weight);
+    const lineWidth = weightToWidth(c.weight) * scale;
     /* colour is never forced by locked/ephemeral state — only by the user */
     const lineColor = c.color || PALETTE.edge;
 
@@ -221,7 +232,6 @@ export function buildElements(
       lineColor,
       lineStyle: effectiveLineStyle(c, locked),
       lineWidth,
-      lineWidthHl: lineWidth + 2,
       textColor: c.textColor || PALETTE.edgeText,
       sourceArrow: c.arrowSource ? 'triangle' : 'none',
       targetArrow: c.arrowTarget ? 'triangle' : 'none'
@@ -252,7 +262,7 @@ export function buildElements(
           source: c.sourceId,
           target: c.targetId,
           label,
-          labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT)
+          labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT) * scale
         },
         classes: ['connection', hasNotes ? 'has-notes' : ''].filter(Boolean).join(' ')
       });
@@ -285,8 +295,9 @@ export function buildElements(
       };
     };
 
-    const outStub = stub(c.outDx, c.outDy, 170, 80, portalNodeId(c.id, 'out'), srcPos);
-    const inStub = stub(c.inDx, c.inDy, -170, -80, portalNodeId(c.id, 'in'), tgtPos);
+    /* the *default* offset must clear a bigger room; a saved one is absolute */
+    const outStub = stub(c.outDx, c.outDy, 170 * scale, 80 * scale, portalNodeId(c.id, 'out'), srcPos);
+    const inStub = stub(c.inDx, c.inDy, -170 * scale, -80 * scale, portalNodeId(c.id, 'in'), tgtPos);
 
     const outLabel = showLabels
       ? wrapLabel(`${locked ? '🔒 ' : ''}${glyph} To ${safeName(tgt)}${suffix}`, 190, PORTAL_LABEL_FONT).join('\n')
@@ -306,7 +317,7 @@ export function buildElements(
         shape: 'tag',
         parent: parentOf(src),
         label: outLabel,
-        ...boxFor(outLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT)
+        ...boxFor(outLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, scale)
       },
       position: outStub.position,
       classes: 'portal portal-out'
@@ -323,7 +334,7 @@ export function buildElements(
         shape: 'tag',
         parent: parentOf(tgt),
         label: inLabel,
-        ...boxFor(inLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT)
+        ...boxFor(inLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, scale)
       },
       position: inStub.position,
       classes: 'portal portal-in'

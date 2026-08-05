@@ -70,6 +70,15 @@ the axis that plane does not show (X/Y → by Z, lowest underneath), and on ever
 layout by the area each box covers once positioning finishes, largest underneath. A
 sub-grouping always draws over its parent. The higher a box sits the more solid it is
 drawn, and the sidebar spells the order out as `Layer 3/5 (Z 2)`.
+Because a grouping box covers a lot of canvas, what a drag inside one does is a
+setting — and the same choice is available for rooms: **Always Draggable** (grabs, so
+you cannot pan over it), **Never Draggable** (always pans), or **Draggable When
+Selected** (both at once: drag to pan, click the thing to pick it up, drag it, then
+click away or press `Esc`). Groupings default to *When Selected*, rooms to *Always*.
+Under the hood this flips Cytoscape's per-element `grabbable`/`pannable` pair; clicking
+to select, marquee multi-select and multi-drag all keep working in every mode.
+Anything currently panned through is also exempted from Cytoscape's default `:active`
+halo, so a press that only pans produces no visual change at all.
 
 **Draw order** follows the same rule one level down: rooms are stacked by their
 off-plane coordinate on a coordinate layout, and biggest-box-first everywhere else, so
@@ -95,14 +104,14 @@ button to re-stamp on demand. Blank/"No Override" fields are never applied.
 | Re-attach an end | Select a connection, drag either amber handle onto another room |
 | Inspect / edit | Click anything. Edits apply on **Apply** or when you click outside the panel. Controls that act immediately (labels, grouping, visited) never discard what you have typed — only **Revert** does |
 | Resize a room | Inspector → **Size** (or **Change Size** when several are selected) |
-| Multi-select | **Right-drag** empty space to marquee rooms (groupings are never caught); drag any one to move them all; the inspector mass-edits shape, grouping, colours and visited |
-| Groupings | Right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, ungroup, delete |
+| Multi-select | **Right-drag** empty space *or a grouping box* to marquee rooms; drag any one to move them all; the inspector mass-edits shape, grouping, colours and visited |
+| Groupings | Right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, deselect, ungroup, delete |
 | Labels | Sidebar → **Labels**; add chips from a location's or connection's inspector |
 | Mark visited | Double-click a room, or the inspector checkbox. **Reset All Visited** in the Trip Planner clears them all |
 | Search | Sidebar search with Notes / Locations / Connections toggles and a **Filter By Label** |
 | Layouts | Toolbar: ELK Layered, ELK Tree, fCoSE, Breadth-First, Concentric, Grid, Saved Positions — plus **Coordinate Grid** (X/Y, X/Z, Y/Z) |
 | Trip planning | Sidebar → **Trip Planner** |
-| Settings | Cogwheel: scroll sensitivity, zoom-independent sizing, tiny-label culling, planner time limit |
+| Settings | Cogwheel: scroll sensitivity, base size, zoom-independent sizing, tiny-label culling, drag-vs-pan for groupings and locations, planner time limit. Each has a `?` for the detail |
 | Delete | Select, then `Del`. `Esc` closes the top-most overlay (menu → modal → selection) |
 | Import/Export | Toolbar — full JSON round-trip including groupings, labels and coordinates |
 
@@ -256,14 +265,48 @@ are `CHECK`-constrained positive.
 
 * Canvas rendering with incremental element reconciliation — editing one node never
   rebuilds the scene graph, and edges whose endpoints changed are re-created because
-  Cytoscape cannot re-point an existing edge.
-* **Zoom-independent sizing**: every size-like property has a pre-multiplied `…View`
-  twin recomputed on zoom (`zoom^-strength`), so boxes and names stay readable at any
-  distance. A location's size scalar is baked into its *base* box and multiplied into
-  the text-side properties alongside the zoom factor, so the two never interfere.
-  Every layout is solved against base geometry — automatic layouts temporarily pin
-  the compensation to 1 — so the arrangement is zoom-invariant and re-layouts never
-  drift larger.
+  Cytoscape cannot re-point an existing edge. The reconcile also **skips writes that
+  change nothing**: a `data()` or `classes()` call restyles the element whether or not
+  the value moved, so editing one room used to restyle the entire graph. Only the
+  classes `buildElements` owns are diffed, which leaves the runtime ones (highlight,
+  route, `pan-through`, `zLayer`) in place and makes the stacking, drag-mode and
+  highlight passes free when nothing changed.
+* Zoom compensation is the most expensive thing the app can do — one factor change
+  restyles every element and discards Cytoscape's texture cache — so: it is **off by
+  default**, the viewport handler returns immediately when it is off, a 3 % deadband
+  ignores tiny factor moves, each element is written in a **single** `data()` call, the
+  pass is rate-limited from 16 ms to 250 ms by element count, and past **8 000
+  elements** it switches itself off and says so in the status bar.
+* **One global, shape-aware render ratio.** Cytoscape caches elements and labels in
+  1024 px texture atlases and re-renders anything larger *every frame*; Chrome stops
+  caching glyph rasters around 256 px. So `R = min(1, 900 / (maxNodeBox × f × zoom))`
+  is applied to every size-like property of every element: the largest drawn box —
+  shape metrics, per-room scalar and Base Size all folded into `data.w/h` — drives it,
+  so a star hits the ceiling before a rectangle with the same label, and a size-5 room
+  that hits it leaves size-1 rooms at exactly a fifth of it. A node's label is strictly
+  inside its box (`w = textW·wFactor + padX`), so bounding the box bounds its texture;
+  connection and grouping names wrap in nothing and get a second ratio. `R` is quantised
+  to ~2 % steps rounding down, and when `R = 1` the view data has no zoom dependence at
+  all — so the normal regime stays free, and the clamped regime is self-limiting
+  (`R < 1` means the biggest node fills the screen, so almost nothing is visible).
+* **The zoom floor and Fit solve the compensated extent properly.** Under compensation
+  the drawn content does not shrink linearly with the zoom — at strength 1 the boxes
+  never shrink at all — so `viewport / box` is simply wrong. `rendered(z) = aW·z +
+  bW·z^(1−s)` is strictly increasing, so the fit is found by geometric bisection over a
+  conservative affine model of the extent, built from the exact drawn bounds at the two
+  extreme factors (the upper bounds are convex in `f`, the lower concave, so the chord
+  encloses). One arithmetic pass, O(1) per probe, and no bounding box is ever measured.
+  The render ratio only shrinks geometry, so a fit solved without it always fits.
+* **Base Size** (default `2`) multiplies every box, line and name. It is baked into the
+  element data, so `baseSize(node)` — and therefore every layout, the coordinate grid
+  and the spacing metrics — sizes the boxes that will actually be drawn. Absolute gaps
+  deliberately do *not* scale, so raising it gives chunkier boxes against the same
+  whitespace; re-layout after changing it. It goes up to `32`.
+* **Zoom-independent sizing** (off by default: it rewrites every node's geometry on each
+  zoom step) multiplies on top. Every size-like property has a pre-multiplied `…View`
+  twin recomputed on zoom (`zoom^-strength`), so at strength 1 a room holds at exactly
+  Base Size on screen. Layouts are solved against base geometry — they temporarily pin
+  the compensation to 1 — so the arrangement is zoom-invariant and never drifts larger.
 * Drag positions and ephemeral stub offsets are debounced and written in one
   `UPDATE … FROM unnest(...)`; pending writes are flushed before switching maps.
 * **Wheel zooming is ours, not Cytoscape's.** The library only accepts a
@@ -301,10 +344,13 @@ are `CHECK`-constrained positive.
   local-only tool; if this API is ever exposed beyond localhost, both need addressing.
 * There is no test suite in this repository. Validate changes with `npm run
   typecheck` (and `npm run build`) in each package.
+* `buildElements` still rebuilds the whole element array on every store change (the
+  diffing above keeps that cheap, but the allocation is O(elements)). Memoising it per
+  row would be the next optimisation for maps in the tens of thousands.
 * The schema has no migration path, by design. Adding a column means recreating the
   database: export your maps, `docker compose down -v`, `docker compose up --build`,
   then import (import fills in anything an older export is missing, e.g. `size: 1`).
-* Zoom-independent sizing inflates boxes in *model* space as you zoom out, while
-  layouts are solved against base geometry, so at extreme zoom-out the compensated
-  boxes can visually crowd an otherwise overlap-free arrangement. Lower the
-  compensation strength in Settings if that bothers you.
+* Zoom-independent sizing inflates boxes in *model* space when you zoom out, while layouts
+  are solved against base geometry, so at extreme zoom-out compensated boxes can visually
+  crowd each other. Lower the strength — or leave the feature off and raise **Base Size**
+  instead, which every layout does account for.

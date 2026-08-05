@@ -27,16 +27,17 @@ export async function seedDemoMap() {
       x: number;
       y: number;
     }> = [
+      /* spaced for the default Base Size of 2 */
       { name: 'Hotel Lobby', group: hotel, kind: 'round-rectangle', size: 1.4, layer: 'Ground',
         notes: 'Start here. The front desk holds the luggage.', visited: true, x: 0, y: 0 },
       { name: 'Hotel Room 214', group: hotel, kind: 'round-rectangle', size: 1, layer: 'Floor 2',
-        notes: 'The ephemeral link models the elevator.', visited: false, x: 250, y: -150 },
+        notes: 'The ephemeral link models the elevator.', visited: false, x: 500, y: -300 },
       { name: 'Rental Car Desk', group: null, kind: 'diamond', size: 1, layer: 'Ground',
-        notes: 'You must pick up the keys before you can drive.', visited: false, x: 560, y: 150 },
+        notes: 'You must pick up the keys before you can drive.', visited: false, x: 1120, y: 300 },
       { name: 'Parking Garage', group: null, kind: 'hexagon', size: 1, layer: 'Underground',
-        notes: 'Level -1, spot C14.', visited: false, x: 900, y: 150 },
+        notes: 'Level -1, spot C14.', visited: false, x: 1800, y: 300 },
       { name: 'Airport Terminal B', group: null, kind: 'star', size: 2, layer: 'City',
-        notes: 'Forty minute drive.', visited: false, x: 1240, y: 60 }
+        notes: 'Forty minute drive.', visited: false, x: 2480, y: 120 }
     ];
 
     const id = new Map<string, string>();

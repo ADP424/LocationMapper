@@ -51,13 +51,19 @@ export interface LayoutMetrics {
   /** Node extents in *base* units, so per-location size scalars are included. */
   avgNodeSpan: number;
   p90NodeSpan: number;
+  /** The global base size the geometry above was measured at. */
+  baseScale: number;
 }
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const percentile = (sorted: number[], p: number) =>
   sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : 0;
 
-export function computeMetrics(labelWidths: number[], nodeSpans: number[]): LayoutMetrics {
+export function computeMetrics(
+  labelWidths: number[],
+  nodeSpans: number[],
+  baseScale = 1
+): LayoutMetrics {
   const widths = labelWidths.filter((w) => w > 0).sort((a, b) => a - b);
   const spans = nodeSpans.filter((s) => s > 0).sort((a, b) => a - b);
   return {
@@ -65,15 +71,18 @@ export function computeMetrics(labelWidths: number[], nodeSpans: number[]): Layo
     avgEdgeLabelWidth: mean(widths),
     p90EdgeLabelWidth: percentile(widths, 0.9),
     avgNodeSpan: mean(spans),
-    p90NodeSpan: percentile(spans, 0.9)
+    p90NodeSpan: percentile(spans, 0.9),
+    baseScale
   };
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
- * Roughly a default-size room with a short name. Spacing only grows *past* this,
- * so a map that never touches the size scalar lays out exactly as it always did.
+ * Roughly a default-size room with a short name, *at base size 1*. Spacing only
+ * grows past this, so a map that never touches the per-location size scalar lays
+ * out exactly as it always did — and raising the global base size gives chunkier
+ * boxes against the same whitespace rather than a no-op uniform zoom.
  */
 const NOMINAL_NODE_SPAN = 120;
 
@@ -103,8 +112,9 @@ const nodeSpan = (n: any) => {
 export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutOptions {
   const { nodeCount, avgEdgeLabelWidth: avg, p90EdgeLabelWidth: p90, p90NodeSpan } = metrics;
   const animate = nodeCount <= 400;
+  const nominal = NOMINAL_NODE_SPAN * metrics.baseScale;
   /** Extra space the over-sized rooms deserve; 0 on a default map. */
-  const big = Math.max(0, p90NodeSpan - NOMINAL_NODE_SPAN);
+  const big = Math.max(0, p90NodeSpan - nominal);
 
   switch (name) {
     case 'elk-layered':
@@ -164,7 +174,7 @@ export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutO
         idealEdgeLength: (edge: any) =>
           95 +
           ((edge.data('labelWidth') as number) ?? 0) * 1.15 +
-          Math.max(0, (nodeSpan(edge.source()) + nodeSpan(edge.target())) / 2 - NOMINAL_NODE_SPAN),
+          Math.max(0, (nodeSpan(edge.source()) + nodeSpan(edge.target())) / 2 - nominal),
         edgeElasticity: () => 0.4,
         nodeSeparation: clamp(110 + avg * 0.4 + big * 0.6, 110, 600),
         nodeRepulsion: () => clamp(9_000 + p90 * 70 + big * 120, 9_000, 120_000),

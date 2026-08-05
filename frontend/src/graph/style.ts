@@ -138,10 +138,10 @@ export const graphStyle: any[] = [
       'overlay-padding': 5
     }
   },
-  {
-    selector: 'node.group:selected',
-    style: { 'overlay-opacity': 0, 'border-width': 'data(borderNeighbourView)' }
-  },
+  /* Elements the user pans *through* must not react to the press at all:
+     Cytoscape's default stylesheet halos `:active` elements, and the rule above
+     tints a selected one — both flicker when the gesture was only a pan. */
+  { selector: '.pan-through', style: { 'overlay-opacity': 0 } },
 
   /* ------------------------------------------------------- planned trip */
   {

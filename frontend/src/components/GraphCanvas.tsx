@@ -2,17 +2,29 @@ import cytoscape, { Core, ElementDefinition, NodeSingular } from 'cytoscape';
 import elk from 'cytoscape-elk';
 import fcose from 'cytoscape-fcose';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cyHolder } from '../graph/cyHolder';
+import { cyHolder, fitGraph } from '../graph/cyHolder';
 import { buildElements, groupNodeId, isInternalId, parsePortalId, portalEdgeId } from '../graph/elements';
 import { computeCoordinateLayout } from '../graph/coordinateLayout';
 import { computeGroupedLayout } from '../graph/groupLayout';
 import { applyGroupLayers, applyRoomLayers, computeGroupLayers } from '../graph/layering';
 import { descendantGroupIds, buildGroupTree } from '../graph/groups';
+import { applyDragModes } from '../graph/dragModes';
 import { COORDINATE_LAYOUTS, computeMetrics, isCoordinateLayout, layoutOptions } from '../graph/layouts';
 import type { RoutePlan } from '../graph/pathfinding';
 import { graphStyle } from '../graph/style';
-import { applyViewScale, baseSize, viewScaleFactor } from '../graph/viewScale';
+import {
+  EMPTY_BUDGET,
+  type GeometryBudget,
+  MAX_COMPENSATED_ELEMENTS,
+  applyViewScale,
+  baseSize,
+  compensationInterval,
+  invalidateViewScale,
+  renderRatios,
+  viewScaleFactor
+} from '../graph/viewScale';
 import { bindWheelZoom } from '../graph/wheelZoom';
+import { DEFAULT_MIN_ZOOM, MAX_ZOOM, fitToContent, refreshMinZoom } from '../graph/zoomBounds';
 import { useGraphStore } from '../state/store';
 import type { PortalOffset, Selection } from '../types';
 import GraphScrollbars from './GraphScrollbars';
@@ -39,7 +51,6 @@ function registerExtensions() {
 }
 
 function refreshRendering(cy: Core) {
-  cy.style().update();
   cy.forceRender();
 }
 
@@ -62,10 +73,40 @@ function rebaseStubOffsets(cy: Core) {
 }
 
 const IMMUTABLE = new Set(['id', 'source', 'target', 'parent']);
+
+/**
+ * Data the *runtime* owns — the stacking pass writes these after every
+ * arrangement — so a reconcile must not reset them (and must not see them as a
+ * change, or nothing would ever be skipped). New elements still get the
+ * neutral defaults from their definition.
+ */
+const RUNTIME_DATA = new Set(['zLayer', 'groupFillOpacity', 'groupBorderOpacity']);
+
+/**
+ * Classes `buildElements` owns. Everything else (highlight, route, `pan-through`)
+ * is applied at runtime and now survives a reconcile, which is what makes the
+ * highlight/layering/drag passes cheap no-ops when nothing has changed.
+ */
+const BASE_CLASSES = [
+  'group', 'location', 'visited', 'unvisited', 'has-notes', 'connection',
+  'portal', 'portal-out', 'portal-in', 'stub', 'stub-out', 'stub-in'
+];
+
+const skipKey = (k: string) => IMMUTABLE.has(k) || RUNTIME_DATA.has(k);
+
 function mutableData(data: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(data)) if (!IMMUTABLE.has(k)) out[k] = v;
+  for (const [k, v] of Object.entries(data)) if (!skipKey(k)) out[k] = v;
   return out;
+}
+
+/** Element data is all primitives, so identity is the right comparison. */
+function sameData(current: Record<string, unknown>, next: Record<string, unknown>) {
+  for (const k in next) {
+    if (skipKey(k)) continue;
+    if (current[k] !== next[k]) return false;
+  }
+  return true;
 }
 
 function syncGraph(
@@ -119,8 +160,25 @@ function syncGraph(
       const previousParent = existing.isNode()
         ? (existing.parent().first().id() as string | undefined) ?? undefined
         : undefined;
-      existing.data(mutableData(el.data as Record<string, unknown>));
-      existing.classes(typeof el.classes === 'string' ? el.classes : '');
+
+      /* a write that changes nothing still restyles the element: on a big map
+         that is the difference between editing one room and restyling the lot */
+      const next = el.data as Record<string, unknown>;
+      if (!sameData(existing.data(), next)) {
+        existing.data(mutableData(next));
+        /* its `…View` twins are derived from `w`/`h`/`lineWidth` — re-derive them */
+        invalidateViewScale(existing);
+      }
+
+      const wanted = new Set(
+        (typeof el.classes === 'string' ? el.classes : '').split(' ').filter(Boolean)
+      );
+      for (const cls of BASE_CLASSES) {
+        const want = wanted.has(cls);
+        if (existing.hasClass(cls) === want) continue;
+        if (want) existing.addClass(cls);
+        else existing.removeClass(cls);
+      }
 
       /* locations, ephemeral stubs AND sub-groupings all follow data.parent so
          that nesting (including grouping-inside-grouping) stays in sync */
@@ -148,6 +206,11 @@ function syncGraph(
   return structural;
 }
 
+const HIGHLIGHT_CLASSES =
+  'hl-primary hl-neighbor faded route-node route-edge route-start route-stop route-end';
+const HIGHLIGHT_SELECTOR =
+  '.hl-primary, .hl-neighbor, .faded, .route-node, .route-edge, .route-start, .route-stop, .route-end';
+
 function applyHighlight(
   cy: Core,
   selection: Selection | null,
@@ -157,9 +220,9 @@ function applyHighlight(
   waypoints: string[] = []
 ) {
   cy.batch(() => {
-    cy.elements().removeClass(
-      'hl-primary hl-neighbor faded route-node route-edge route-start route-stop route-end'
-    );
+    /* only the elements that actually carry one — clearing the whole graph cost
+       a style write per element even with nothing selected */
+    cy.elements(HIGHLIGHT_SELECTOR).removeClass(HIGHLIGHT_CLASSES);
 
     /* a planned trip owns the view: everything off-route is dimmed */
     if (route && (route.locationIds.length || route.connectionIds.length)) {
@@ -301,6 +364,15 @@ export default function GraphCanvas() {
   const lastMapRef = useRef<string | null>(null);
   const [cyReady, setCyReady] = useState(false);
   const factorRef = useRef(1);
+  /** Elements deferred by the last viewport-limited pass. */
+  const staleRef = useRef(0);
+  /** The render ratio last applied — how the viewport handler detects a real change. */
+  const ratiosRef = useRef({ box: 1, text: 1 });
+  /** Drives the global render ratio; shapes and scalars are already in `w`/`h`. */
+  const budgetRef = useRef<GeometryBudget>(EMPTY_BUDGET);
+  /** Kept in step with `elements`, so rate-limiting never has to walk the graph. */
+  const elementCountRef = useRef(0);
+  const compensationWarnedRef = useRef(false);
   /**
    * Held by the layout currently being solved, so every effect agrees on base
    * geometry. A token rather than a boolean: a cancelled layout can still emit
@@ -315,6 +387,38 @@ export default function GraphCanvas() {
    * coordinate arrangement must keep its coordinate-based grouping stack.
    */
   const layeringSourceRef = useRef(useGraphStore.getState().layout);
+
+  /**
+   * The compensation factor to use right now. Off, or past the element ceiling,
+   * it is simply 1 — and then the viewport handler does no work at all. Reads
+   * refs only, so it stays stable across renders without being memoised.
+   */
+  const compensationFor = (cy: Core) => {
+    const settings = settingsRef.current;
+    if (!settings.constantSize) return 1;
+    if (elementCountRef.current > MAX_COMPENSATED_ELEMENTS) {
+      if (!compensationWarnedRef.current) {
+        compensationWarnedRef.current = true;
+        useGraphStore
+          .getState()
+          .setStatus('Zoom-Independent Sizing Paused — Too Many Elements On This Map');
+      }
+      return 1;
+    }
+    return viewScaleFactor(cy.zoom(), settings);
+  };
+
+  /** Apply and remember what was applied, so the viewport handler can short-circuit. */
+  const rescale = (
+    cy: Core,
+    f: number,
+    opts?: { unclamped?: boolean; viewportOnly?: boolean }
+  ) => {
+    ratiosRef.current = opts?.unclamped
+      ? { box: 1, text: 1 }
+      : renderRatios(cy.zoom(), f, budgetRef.current);
+    staleRef.current = applyViewScale(cy, f, settingsRef.current, budgetRef.current, opts);
+  };
 
   const [marquee, setMarquee] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(
     null
@@ -359,12 +463,36 @@ export default function GraphCanvas() {
     () =>
       buildElements(Object.values(locations), Object.values(connections), Object.values(groups), {
         labelMode,
+        baseScale: settings.baseScale,
         positionOverrides: pendingPositions,
         portalOffsetOverrides: pendingPortalOffsets,
         ...labelNames
       }),
-    [locations, connections, groups, labelMode, pendingPositions, pendingPortalOffsets, labelNames]
+    [
+      locations,
+      connections,
+      groups,
+      labelMode,
+      settings.baseScale,
+      pendingPositions,
+      pendingPortalOffsets,
+      labelNames
+    ]
   );
+
+  /** Drives the global render ratio; shapes and scalars are already in `w`/`h`. */
+  const budget = useMemo<GeometryBudget>(() => {
+    let maxBox = 0;
+    let maxLabel = 0;
+    for (const el of elements) {
+      const d = el.data as Record<string, unknown>;
+      if (typeof d.w === 'number' && typeof d.h === 'number') {
+        maxBox = Math.max(maxBox, d.w, d.h);
+      }
+      if (typeof d.labelWidth === 'number') maxLabel = Math.max(maxLabel, d.labelWidth);
+    }
+    return { maxBox, maxLabel };
+  }, [elements]);
 
   /** Selecting a label highlights everything carrying it. */
   const labelMembers = useMemo(() => {
@@ -393,14 +521,16 @@ export default function GraphCanvas() {
       hideEdgesOnViewport: false,
       textureOnViewport: false,
       motionBlur: false,
-      minZoom: 0.04,
-      maxZoom: 4,
+      /* the floor tracks the map's size from here on — see graph/zoomBounds */
+      minZoom: DEFAULT_MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
       selectionType: 'single',
       boxSelectionEnabled: false
     });
 
     cyRef.current = cy;
     cyHolder.cy = cy;
+    cyHolder.fit = (padding = 60) => fitAndRescale(cy, padding);
     setCyReady(true);
 
     /* the app owns wheel zooming — see graph/wheelZoom for why Cytoscape's is
@@ -411,31 +541,54 @@ export default function GraphCanvas() {
     });
 
     /* keep boxes/labels a constant size on screen while zooming */
-    factorRef.current = viewScaleFactor(cy.zoom(), settingsRef.current);
-    applyViewScale(cy, factorRef.current, settingsRef.current);
+    factorRef.current = compensationFor(cy);
+    rescale(cy, factorRef.current);
 
     let scaleFrame = 0;
     let scaleTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastScaleAt = 0;
+
     const refreshScale = () => {
-      const f = viewScaleFactor(cy.zoom(), settingsRef.current);
-      if (Math.abs(f - factorRef.current) / Math.max(factorRef.current, 0.0001) < 0.01) return;
-      factorRef.current = f;
-      /* a running layout owns the geometry: it is solved at base scale */
-      if (layoutScaleLock.current) return;
-      applyViewScale(cy, f, settingsRef.current);
+      scaleFrame = 0;
+      const f = compensationFor(cy);
+      const moved = Math.abs(f - factorRef.current) / Math.max(factorRef.current, 0.0001) >= 0.03;
+      if (moved) factorRef.current = f;
+      if (layoutScaleLock.current) return; // a running layout owns the geometry
+
+      const next = renderRatios(cy.zoom(), factorRef.current, budgetRef.current);
+      const clamped = next.box !== ratiosRef.current.box || next.text !== ratiosRef.current.text;
+      if (!moved && !clamped && staleRef.current === 0) return;
+
+      lastScaleAt = performance.now();
+      rescale(cy, factorRef.current, { viewportOnly: true });
     };
-    const onViewport = () => {
-      /* huge graphs only re-scale once the wheel settles */
-      if (cy.nodes().length > 4000) {
-        if (scaleTimer) clearTimeout(scaleTimer);
-        scaleTimer = setTimeout(refreshScale, 140);
+
+    /* one pass restyles every element, so its rate has to follow the graph size */
+    const scheduleScale = () => {
+      if (scaleTimer || scaleFrame) return;
+      const wait = Math.max(
+        0,
+        compensationInterval(elementCountRef.current) - (performance.now() - lastScaleAt)
+      );
+      if (wait === 0) {
+        scaleFrame = requestAnimationFrame(refreshScale);
         return;
       }
-      if (scaleFrame) return;
-      scaleFrame = requestAnimationFrame(() => {
-        scaleFrame = 0;
-        refreshScale();
-      });
+      scaleTimer = setTimeout(() => {
+        scaleTimer = null;
+        scaleFrame = requestAnimationFrame(refreshScale);
+      }, wait);
+    };
+
+    /* nothing depends on the zoom while the ratio is 1, so an unclamped pan or
+       zoom with compensation off costs nothing at all */
+    const viewportDirty = () => {
+      if (staleRef.current > 0 || settingsRef.current.constantSize) return true;
+      const next = renderRatios(cy.zoom(), 1, budgetRef.current);
+      return next.box !== ratiosRef.current.box || next.text !== ratiosRef.current.text;
+    };
+    const onViewport = () => {
+      if (viewportDirty()) scheduleScale();
     };
     cy.on('viewport', onViewport);
 
@@ -444,6 +597,7 @@ export default function GraphCanvas() {
       const el = containerRef.current;
       if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       cy.resize();
+      refreshMinZoom(cy, settingsRef.current);
       if (!fittedOnce && cy.nodes().length) {
         fittedOnce = true;
         fitAndRescale(cy, 60);
@@ -541,7 +695,8 @@ export default function GraphCanvas() {
     /* ------------------------------------- right-drag marquee selection */
     cy.on('cxttapstart', (ev) => {
       suppressMenuRef.current = false;
-      if (ev.target !== cy) {
+      /* a grouping box must not block a marquee — one never catches groupings */
+      if (ev.target !== cy && !ev.target.hasClass('group')) {
         cxtStartRef.current = null;
         return;
       }
@@ -629,19 +784,18 @@ export default function GraphCanvas() {
       if (scaleFrame) cancelAnimationFrame(scaleFrame);
       if (scaleTimer) clearTimeout(scaleTimer);
       setCyReady(false);
+      cyHolder.fit = null;
       cyHolder.cy = null;
       cyRef.current = null;
       cy.destroy();
     };
   }, []);
 
-  /** Fit against base sizes, then re-apply the zoom compensation. */
+  /** Frame the whole map, then re-apply the zoom compensation. */
   const fitAndRescale = (cy: Core, padding: number) => {
-    applyViewScale(cy, 1, settingsRef.current);
-    cy.fit(undefined, padding);
-    factorRef.current = viewScaleFactor(cy.zoom(), settingsRef.current);
-    /* a layout may be mid-solve: it re-applies the factor when it releases */
-    applyViewScale(cy, currentScale(), settingsRef.current);
+    fitToContent(cy, settingsRef.current, padding);
+    factorRef.current = compensationFor(cy);
+    rescale(cy, currentScale(), { viewportOnly: true });
   };
 
   /** The scale every other effect should write: 1 while a layout is running. */
@@ -668,10 +822,29 @@ export default function GraphCanvas() {
     settingsRef.current = settings;
     const cy = cyRef.current;
     if (!cy) return;
-    factorRef.current = viewScaleFactor(cy.zoom(), settings);
-    applyViewScale(cy, currentScale(), settings);
+    factorRef.current = compensationFor(cy);
+    rescale(cy, currentScale(), { viewportOnly: true });
     refreshRendering(cy);
   }, [settings]);
+
+  /* --------------------------------------------------- drag vs pan */
+  const pickedForDrag = useMemo(() => {
+    const ids = new Set<string>(multiSelect);
+    if (selection?.type === 'location') ids.add(selection.id);
+    if (selection?.type === 'group') ids.add(groupNodeId(selection.id));
+    return ids;
+  }, [selection, multiSelect]);
+
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    applyDragModes(cy, {
+      groups: settings.groupDrag,
+      locations: settings.locationDrag,
+      picked: pickedForDrag
+    });
+    /* `elements` so freshly added rooms and groupings are configured too */
+  }, [settings.groupDrag, settings.locationDrag, pickedForDrag, elements]);
 
   /* ---------------------------------------------- reconcile the elements */
   useEffect(() => {
@@ -679,6 +852,9 @@ export default function GraphCanvas() {
     if (!cy) return;
     const fullReset = lastMapRef.current !== mapId;
     lastMapRef.current = mapId;
+    elementCountRef.current = elements.length;
+    budgetRef.current = budget;
+    if (fullReset) compensationWarnedRef.current = false;
 
     const extent = cy.extent();
     const centre = {
@@ -690,7 +866,11 @@ export default function GraphCanvas() {
     /* groupings are drawn bottom-most; their order follows the rooms */
     restack(cy);
     /* new/changed elements need their zoom-compensated sizes */
-    applyViewScale(cy, currentScale(), settingsRef.current);
+    rescale(cy, currentScale(), { viewportOnly: true });
+    /* …and a bigger (or smaller) map can be pulled back further (or less) */
+    refreshMinZoom(cy, settingsRef.current);
+    /* a precise, once-per-reconcile signal — unlike `style`, which fires per element */
+    cy.emit('mapgraphgeometry');
     applyHighlight(cy, selection, multiSelect, labelMembers, routePlan, waypoints);
     if (structural) refreshRendering(cy);
 
@@ -702,7 +882,7 @@ export default function GraphCanvas() {
         refreshRendering(cy);
       });
     }
-  }, [elements, selection, multiSelect, labelMembers, routePlan, waypoints, mapId]);
+  }, [elements, budget, selection, multiSelect, labelMembers, routePlan, waypoints, mapId]);
 
   /* ------------------------------------------------------ run the layout */
   useEffect(() => {
@@ -717,7 +897,9 @@ export default function GraphCanvas() {
       cy.nodes('.location, .portal').map((n) => {
         const b = baseSize(n);
         return Math.max(b.w, b.h);
-      })
+      }),
+      /* so the "oversized room" threshold is relative to the current base size */
+      settingsRef.current.baseScale
     );
 
     /* stub boxes are persisted too, so a layout keeps them where it put them */
@@ -803,10 +985,11 @@ export default function GraphCanvas() {
            can still emit `layoutstop` after its successor has taken it */
         if (layoutScaleLock.current !== token) return;
         layoutScaleLock.current = null;
-        applyViewScale(cy, factorRef.current, settingsRef.current);
+        rescale(cy, factorRef.current, { viewportOnly: true });
       };
       layoutScaleLock.current = token;
-      applyViewScale(cy, 1, settingsRef.current);
+      /* the engines read `n.width()`: no compensation, and no rendered ceilings */
+      rescale(cy, 1, { unclamped: true });
       /* …and a layout that never reports back must not freeze the compensation,
          which looks exactly like the wheel suddenly got more sensitive */
       watchdog = setTimeout(release, LAYOUT_WATCHDOG_MS);
@@ -831,7 +1014,7 @@ export default function GraphCanvas() {
     }
 
     (async () => {
-      const positions = await computeGroupedLayout(cy, layout);
+      const positions = await computeGroupedLayout(cy, layout, settingsRef.current.baseScale);
       if (cancelled || !positions.size) return;
       cy.batch(() => {
         positions.forEach((p, id) => {
@@ -888,7 +1071,7 @@ export default function GraphCanvas() {
         classes: 'ghost-edge'
       }
     ]);
-    applyViewScale(cy, currentScale(), settingsRef.current);
+    rescale(cy, currentScale());
 
     const onMove = (ev: any) => {
       const ghost = cy.getElementById(GHOST_NODE);
@@ -962,7 +1145,7 @@ export default function GraphCanvas() {
         grabbable: true
       }
     ]);
-    applyViewScale(cy, currentScale(), settingsRef.current);
+    rescale(cy, currentScale());
 
     /* the cursor is a far better drop probe than the handle's centre */
     const resolveDrop = (handle: any): NodeSingular | null => {
@@ -999,7 +1182,7 @@ export default function GraphCanvas() {
         classes: 'reconnect-edge',
         selectable: false
       });
-      applyViewScale(cy, currentScale(), settingsRef.current);
+      rescale(cy, currentScale());
     };
 
     const onDrag = (ev: any) => {
@@ -1079,6 +1262,11 @@ export default function GraphCanvas() {
     const store = useGraphStore.getState();
     const groupList = Object.values(groups);
     const tree = buildGroupTree(groupList);
+    /* makes "Draggable When Selected" comfortable: put the thing down from here */
+    const deselect: MenuEntry[] =
+      selection || multiSelect.length
+        ? [{ label: 'Deselect', onSelect: () => store.select(null) }]
+        : [];
 
     if (contextMenu.groupId) {
       const id = contextMenu.groupId;
@@ -1102,6 +1290,7 @@ export default function GraphCanvas() {
           onSelect: () => void store.createLocationAt(contextMenu.graphX, contextMenu.graphY, null)
         },
         { label: 'Inspect Grouping', onSelect: () => store.selectGroup(id) },
+        ...deselect,
         {
           kind: 'submenu',
           label: 'Move Grouping Into',
@@ -1114,7 +1303,6 @@ export default function GraphCanvas() {
             ...(moveEntries.length ? [{ kind: 'heading' as const, label: 'Groupings' }, ...moveEntries] : [])
           ]
         },
-        { label: 'Re-Layout Graph', onSelect: () => store.runLayout() },
         { label: 'Remove All Rooms From Grouping', onSelect: () => void store.ungroupAll(id) },
         {
           label: 'Delete Grouping (Keep Contents)',
@@ -1145,6 +1333,7 @@ export default function GraphCanvas() {
           onSelect: () => void store.createGroupFrom(selected)
         },
         { label: 'Inspect Location', onSelect: () => store.selectLocation(id) },
+        ...deselect,
         {
           label: `+ Add To Trip (Stop ${store.trip.waypoints.length + 1})`,
           onSelect: () => store.addWaypoint(id)
@@ -1180,10 +1369,10 @@ export default function GraphCanvas() {
         label: '+ Create Room',
         onSelect: () => void store.createLocationAt(contextMenu.graphX, contextMenu.graphY)
       },
-      { label: 'Re-Layout Graph', onSelect: () => store.runLayout() },
-      { label: 'Fit To Screen', onSelect: () => cyRef.current?.fit(undefined, 60) }
+      ...deselect,
+      { label: 'Fit To Screen', onSelect: () => fitGraph() }
     ];
-  }, [contextMenu, locations, groups, multiSelect]);
+  }, [contextMenu, locations, groups, multiSelect, selection]);
 
   const closeMenu = useGraphStore((s) => s.closeContextMenu);
 

@@ -1,7 +1,15 @@
 import type { Core } from 'cytoscape';
 import { groupNodeId } from './elements';
 
-export const cyHolder: { cy: Core | null } = { cy: null };
+/** `fit` is registered by GraphCanvas, which owns the view-scale bookkeeping. */
+export const cyHolder: { cy: Core | null; fit: ((padding?: number) => void) | null } = {
+  cy: null,
+  fit: null
+};
+
+export function fitGraph(padding?: number) {
+  cyHolder.fit?.(padding);
+}
 
 export function focusLocation(id: string, select: (id: string) => void) {
   const cy = cyHolder.cy;

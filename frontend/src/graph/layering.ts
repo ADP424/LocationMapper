@@ -1,4 +1,4 @@
-import type { Core } from 'cytoscape';
+import type { Core, NodeSingular } from 'cytoscape';
 import type { Group, Location } from '../types';
 import { coordValue, offPlaneAxis, type CoordinatePlane } from './coordinateLayout';
 import { groupNodeId } from './elements';
@@ -21,6 +21,11 @@ const BORDER_OPACITY = [0.35, 1] as const;
 
 const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
 const pretty = (n: number) => String(Math.round(n * 100) / 100);
+
+/** A write that changes nothing still restyles the element. */
+const setData = (node: NodeSingular, key: string, value: number) => {
+  if (node.data(key) !== value) node.data(key, value);
+};
 
 /**
  * Decide the stacking order of the groupings.
@@ -129,11 +134,9 @@ export function applyGroupLayers(cy: Core, layers: Record<string, GroupLayer>) {
       if (node.empty()) continue;
       /* a lone grouping keeps the neutral mid-ramp look */
       const t = layer.total > 1 ? (layer.order - 1) / (layer.total - 1) : 0.5;
-      node.data({
-        zLayer: layer.order,
-        groupFillOpacity: lerp(FILL_OPACITY[0], FILL_OPACITY[1], t),
-        groupBorderOpacity: lerp(BORDER_OPACITY[0], BORDER_OPACITY[1], t)
-      });
+      setData(node, 'zLayer', layer.order);
+      setData(node, 'groupFillOpacity', lerp(FILL_OPACITY[0], FILL_OPACITY[1], t));
+      setData(node, 'groupBorderOpacity', lerp(BORDER_OPACITY[0], BORDER_OPACITY[1], t));
     }
   });
 }
@@ -167,6 +170,7 @@ export function applyRoomLayers(
     const box = baseSize(node); // base units, so the size scalar counts
     return {
       id: node.id(),
+      node,
       /* no coordinate on this axis: park it underneath the ones that have one */
       coord: coord === null ? -Infinity : coord,
       area: Math.max(0, box.w) * Math.max(0, box.h)
@@ -183,10 +187,10 @@ export function applyRoomLayers(
   cy.batch(() => {
     ranked.forEach((room, i) => {
       layerOf.set(room.id, i + 1);
-      cy.getElementById(room.id).data('zLayer', i + 1);
+      setData(room.node, 'zLayer', i + 1);
     });
     cy.nodes('.portal').forEach((stub) => {
-      stub.data('zLayer', layerOf.get(stub.data('anchorId') as string) ?? 0);
+      setData(stub, 'zLayer', layerOf.get(stub.data('anchorId') as string) ?? 0);
     });
   });
 }
