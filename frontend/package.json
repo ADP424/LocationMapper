@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify:anvil": "tsx scripts/verify-anvil.ts",
+    "verify:spike": "tsx scripts/verify-spike.ts",
+    "verify:stitch": "tsx scripts/verify-stitch.ts",
+    "inspect": "tsx scripts/inspect-region.ts"
   },
   "dependencies": {
     "cytoscape": "^3.29.2",
@@ -16,13 +20,16 @@
     "elkjs": "^0.9.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "three": "^0.169.0",
     "zustand": "^4.5.2"
   },
   "devDependencies": {
     "@types/cytoscape": "^3.21.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.169.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.4.5",
     "vite": "^5.2.11"
   }

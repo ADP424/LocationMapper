@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MapGraph — Anvil render spike</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1013; }
+      body { font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; color: #d8dde3; }
+
+      /* A canvas is a replaced element: `inset: 0` alone will NOT stretch it,
+         it falls back to its 300x150 intrinsic size. The explicit 100% is what
+         actually fills the window. */
+      #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+      #hud {
+        position: fixed; top: 12px; left: 12px; width: 380px; padding: 14px 16px;
+        max-height: calc(100vh - 60px); overflow-y: auto;
+        background: rgba(16, 19, 24, 0.88); border: 1px solid #2b313a; border-radius: 8px;
+        backdrop-filter: blur(6px);
+      }
+      h1 { margin: 0 0 2px; font-size: 14px; letter-spacing: 0.02em; }
+      .sub { margin: 0 0 12px; color: #7d8794; font-size: 11px; }
+
+      .row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 2px 0; }
+      .row span:first-child { flex: 0 0 auto; }
+      .row span:last-child {
+        flex: 1 1 auto; min-width: 0; text-align: right; overflow-wrap: anywhere;
+        color: #9fd0a0; font-variant-numeric: tabular-nums;
+      }
+      .row.warn span:last-child { color: #e8a33d; }
+
+      hr { border: 0; border-top: 1px solid #262c34; margin: 12px 0; }
+      .controls { display: flex; flex-direction: column; gap: 8px; }
+      .field { display: flex; align-items: center; gap: 8px; }
+      .field label { flex: 0 0 84px; color: #7d8794; font-size: 11px; }
+      .field select, .field input { flex: 1 1 auto; min-width: 0; }
+      label { color: #7d8794; font-size: 11px; }
+
+      button, select, input { font: inherit; }
+      button, select {
+        background: #1c222b; color: #d8dde3; border: 1px solid #333c47;
+        border-radius: 5px; padding: 6px 10px; cursor: pointer;
+      }
+      button { text-align: left; width: 100%; }
+      button:hover:not(:disabled), select:hover { background: #232b36; border-color: #445162; }
+      button:disabled { opacity: 0.45; cursor: default; }
+      button.primary { background: #24405e; border-color: #37618c; }
+      button.primary:hover:not(:disabled) { background: #2b4d72; }
+
+      input[type='text'] {
+        width: 100%; background: #10141a; color: #d8dde3; border: 1px solid #333c47;
+        border-radius: 5px; padding: 6px 8px; font-size: 11px;
+      }
+      input[type='text']:focus { outline: none; border-color: #4a7fb5; }
+      input[type='file'] { width: 100%; color: #7d8794; }
+      input[type='file']::file-selector-button {
+        font: inherit; background: #1c222b; color: #d8dde3; border: 1px solid #333c47;
+        border-radius: 5px; padding: 5px 9px; margin-right: 8px; cursor: pointer;
+      }
+
+      #world { margin: 10px 0 0; padding: 8px 10px; background: #151a21; border-radius: 6px; font-size: 11px; }
+      #world .name { color: #d8dde3; }
+      #world .meta { color: #7d8794; }
+      #status { margin-top: 8px; color: #6f9fd0; font-size: 11px; }
+      #err { margin-top: 10px; color: #e8695f; white-space: pre-wrap; font-size: 11px; }
+      #unknown { margin-top: 8px; color: #e8a33d; font-size: 11px; }
+      .hint { position: fixed; bottom: 12px; left: 12px; color: #565f6b; font-size: 11px; }
+      .note { color: #565f6b; font-size: 10px; margin: 2px 0 0; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+
+    <div id="hud">
+      <h1>Anvil render spike</h1>
+      <p class="sub">Phase 0 — naive per-block cubes, no greedy meshing</p>
+
+      <div class="controls">
+        <label for="path">world folder on this machine</label>
+        <input id="path" type="text" spellcheck="false" placeholder="C:\path\to\saves\MyWorld" />
+        <button id="open-path" class="primary">Load from path</button>
+        <p class="note">read by the dev server — no browser permission prompt</p>
+
+        <button id="pick">…or browse for the folder</button>
+        <p class="note" id="pick-note"></p>
+
+        <label for="dirfile">…or a single region file</label>
+        <input id="dirfile" type="file" accept=".mca" />
+
+        <button id="synth">Regenerate synthetic world</button>
+      </div>
+
+      <div id="world" hidden></div>
+
+      <div class="controls" id="loader" hidden style="margin-top: 10px">
+        <div class="field">
+          <label for="dim">dimension</label>
+          <select id="dim"></select>
+        </div>
+        <div class="field">
+          <label for="budget">chunks</label>
+          <select id="budget">
+            <option value="64">64 — 128 blocks across</option>
+            <option value="144">144</option>
+            <option value="256" selected>256 — 256 blocks across</option>
+            <option value="576">576</option>
+            <option value="1024">1024 — one full region</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="centre">centre</label>
+          <select id="centre"></select>
+        </div>
+        <button id="load" class="primary">Load area</button>
+      </div>
+
+      <div id="status"></div>
+      <hr />
+      <div id="stats"></div>
+      <div id="err"></div>
+      <div id="unknown"></div>
+    </div>
+
+    <p class="hint">drag to orbit · scroll to zoom · right-drag to pan</p>
+    <script type="module" src="/src/world/spike/main.ts"></script>
+  </body>
+</html>
