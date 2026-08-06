@@ -27,7 +27,6 @@ export const locationCreate = z.object({
   name: z.string().max(200).optional(),
   kind: z.string().max(60).optional(),
   size: z.number().finite().positive().max(25).optional(),
-  layer: z.string().max(120).optional(),
   notes: z.string().max(100_000).optional(),
   color: z.string().max(40).optional(),
   textColor: z.string().max(40).optional(),
@@ -85,7 +84,6 @@ export const locationLabelCreate = z.object({
   defaultSize: z.number().finite().positive().max(25).nullable().optional(),
   defaultColor: z.string().max(40).optional(),
   defaultTextColor: z.string().max(40).optional(),
-  defaultLayer: z.string().max(120).optional(),
   defaultGroupId: uuid.nullable().optional()
 });
 
@@ -171,10 +169,16 @@ export const graphImport = z.object({
     .optional(),
   locations: z
     .array(
-      locationCreate.omit({ groupId: true }).extend({
+      locationCreate.omit({ groupId: true, coordX: true, coordY: true, coordZ: true }).extend({
         key: z.string().min(1).max(200),
         groupKey: z.string().nullable().optional(),
-        labelKeys: z.array(z.string()).optional()
+        labelKeys: z.array(z.string()).optional(),
+        /* `coord × grid unit` can reach model-space extremes the renderer's
+           extent model and coordinate layout were never sized for; imports
+           from an older export are clamped rather than rejected outright */
+        coordX: z.number().int().min(-10_000).max(10_000).nullable().optional(),
+        coordY: z.number().int().min(-10_000).max(10_000).nullable().optional(),
+        coordZ: z.number().int().min(-10_000).max(10_000).nullable().optional()
       })
     )
     .max(50_000),

@@ -8,6 +8,7 @@ export const GROUP_LABEL_FONT = 'bold 15px Inter, system-ui, -apple-system, sans
 /** Matches the `line-height` Cytoscape uses for wrapped labels at these sizes. */
 export const NODE_LINE_HEIGHT = 15;
 export const PORTAL_LINE_HEIGHT = 13;
+export const GROUP_LINE_HEIGHT = 19;
 
 const cache = new Map<string, number>();
 let ctx: CanvasRenderingContext2D | null | undefined;

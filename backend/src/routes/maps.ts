@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
@@ -9,7 +10,7 @@ import {
   fetchLocations,
   replaceRequirements
 } from '../repo';
-import { insertSql, updateSql } from '../sql';
+import { insertRows, insertSql, updateSql } from '../sql';
 import type { GraphPayload } from '../types';
 import { graphImport, mapCreate, mapUpdate, positionsUpdate, uuid } from '../validation';
 
@@ -91,7 +92,6 @@ mapsRouter.get(
         defaultSize: l.defaultSize,
         defaultColor: l.defaultColor,
         defaultTextColor: l.defaultTextColor,
-        defaultLayer: l.defaultLayer,
         defaultGroupKey: l.defaultGroupId
       })),
       connectionLabels: graph.connectionLabels.map((l) => ({
@@ -115,7 +115,6 @@ mapsRouter.get(
         name: l.name,
         kind: l.kind,
         size: l.size,
-        layer: l.layer,
         notes: l.notes,
         color: l.color,
         textColor: l.textColor,
@@ -283,7 +282,6 @@ mapsRouter.post(
             default_size: l.defaultSize,
             default_color: l.defaultColor,
             default_text_color: l.defaultTextColor,
-            default_layer: l.defaultLayer,
             default_group_id: l.defaultGroupKey ? groupIds.get(l.defaultGroupKey) ?? null : null
           })
         );
@@ -313,40 +311,71 @@ mapsRouter.post(
         }
       }
 
+      /* one INSERT per row here would be 50,000 sequential round-trips on a
+         maximal import — minutes, on one pooled connection, inside an open
+         transaction (and past the reverse proxy's request timeout well before
+         that). Ids are generated client-side so every row can be batched. */
       const locationIds = new Map<string, string>();
+      const locationRows: unknown[][] = [];
+      const locLabelAssignments: unknown[][] = [];
       for (const loc of body.locations) {
-        const id = await insert('locations', {
-          map_id: mapId,
-          group_id: loc.groupKey ? groupIds.get(loc.groupKey) ?? null : null,
-          name: loc.name,
-          kind: loc.kind,
-          size: loc.size,
-          layer: loc.layer,
-          notes: loc.notes,
-          color: loc.color,
-          text_color: loc.textColor,
-          visited: loc.visited,
-          x: loc.x,
-          y: loc.y,
-          coord_x: loc.coordX,
-          coord_y: loc.coordY,
-          coord_z: loc.coordZ
-        });
+        const id = randomUUID();
         locationIds.set(loc.key, id);
-
+        locationRows.push([
+          id,
+          mapId,
+          loc.groupKey ? groupIds.get(loc.groupKey) ?? null : null,
+          loc.name,
+          loc.kind,
+          loc.size,
+          loc.notes,
+          loc.color,
+          loc.textColor,
+          loc.visited,
+          loc.x,
+          loc.y,
+          loc.coordX,
+          loc.coordY,
+          loc.coordZ
+        ]);
         for (const key of loc.labelKeys ?? []) {
           const labelId = locLabelIds.get(key);
           if (!labelId) {
             warn('location label', key);
             continue;
           }
-          await client.query(
-            `INSERT INTO location_label_assignments (location_id, label_id)
-             VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-            [id, labelId]
-          );
+          locLabelAssignments.push([id, labelId]);
         }
       }
+      await insertRows(
+        client,
+        'locations',
+        [
+          'id',
+          'map_id',
+          'group_id',
+          'name',
+          'kind',
+          'size',
+          'notes',
+          'color',
+          'text_color',
+          'visited',
+          'x',
+          'y',
+          'coord_x',
+          'coord_y',
+          'coord_z'
+        ],
+        locationRows
+      );
+      await insertRows(
+        client,
+        'location_label_assignments',
+        ['location_id', 'label_id'],
+        locLabelAssignments,
+        'ON CONFLICT DO NOTHING'
+      );
 
       const resolveLocations = (keys: string[] | undefined, what: string) => {
         const out: string[] = [];
@@ -363,34 +392,42 @@ mapsRouter.post(
         if (ids.length) await replaceRequirements(client, 'label', labelId, ids);
       }
 
+      const connectionRows: unknown[][] = [];
+      const connLabelAssignments: unknown[][] = [];
+      /* connection_requirements is a many-to-many; batched the same way
+         `replaceRequirements` already does it (one unnest INSERT), just
+         accumulated across every connection instead of one round-trip each */
+      const requirementRows: unknown[][] = [];
       for (const conn of body.connections) {
         const src = locationIds.get(conn.sourceKey);
         const tgt = locationIds.get(conn.targetKey);
         if (!src || !tgt) throw badRequest('unknown connection endpoint key');
 
-        const id = await insert('connections', {
-          map_id: mapId,
-          source_id: src,
-          target_id: tgt,
-          name: conn.name,
-          notes: conn.notes,
-          travel_kind: conn.travelKind,
-          color: conn.color,
-          text_color: conn.textColor,
-          arrow_source: conn.arrowSource,
-          arrow_target: conn.arrowTarget,
-          ephemeral: conn.ephemeral,
-          locked: conn.locked,
-          lock_note: conn.lockNote,
-          weight: conn.weight,
-          out_dx: conn.outDx,
-          out_dy: conn.outDy,
-          in_dx: conn.inDx,
-          in_dy: conn.inDy
-        });
+        const id = randomUUID();
+        connectionRows.push([
+          id,
+          mapId,
+          src,
+          tgt,
+          conn.name,
+          conn.notes,
+          conn.travelKind,
+          conn.color,
+          conn.textColor,
+          conn.arrowSource,
+          conn.arrowTarget,
+          conn.ephemeral,
+          conn.locked,
+          conn.lockNote,
+          conn.weight,
+          conn.outDx,
+          conn.outDy,
+          conn.inDx,
+          conn.inDy
+        ]);
 
         const reqIds = resolveLocations(conn.requiresKeys, 'unlock condition');
-        if (reqIds.length) await replaceRequirements(client, 'connection', id, reqIds);
+        for (const locId of new Set(reqIds)) requirementRows.push([id, locId]);
 
         for (const key of conn.labelKeys ?? []) {
           const labelId = connLabelIds.get(key);
@@ -398,13 +435,49 @@ mapsRouter.post(
             warn('connection label', key);
             continue;
           }
-          await client.query(
-            `INSERT INTO connection_label_assignments (connection_id, label_id)
-             VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-            [id, labelId]
-          );
+          connLabelAssignments.push([id, labelId]);
         }
       }
+      await insertRows(
+        client,
+        'connections',
+        [
+          'id',
+          'map_id',
+          'source_id',
+          'target_id',
+          'name',
+          'notes',
+          'travel_kind',
+          'color',
+          'text_color',
+          'arrow_source',
+          'arrow_target',
+          'ephemeral',
+          'locked',
+          'lock_note',
+          'weight',
+          'out_dx',
+          'out_dy',
+          'in_dx',
+          'in_dy'
+        ],
+        connectionRows
+      );
+      await insertRows(
+        client,
+        'connection_requirements',
+        ['connection_id', 'location_id'],
+        requirementRows,
+        'ON CONFLICT DO NOTHING'
+      );
+      await insertRows(
+        client,
+        'connection_label_assignments',
+        ['connection_id', 'label_id'],
+        connLabelAssignments,
+        'ON CONFLICT DO NOTHING'
+      );
 
       return mapId;
     });

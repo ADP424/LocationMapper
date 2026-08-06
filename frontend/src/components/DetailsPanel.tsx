@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isEffectivelyLocked } from '../graph/connectionRules';
+import { formatCoordinates } from '../graph/coordinateLayout';
 import { focusGroup, focusLocation } from '../graph/cyHolder';
 import { describeLock } from '../graph/elements';
 import { descendantGroupIds, groupPathLabel } from '../graph/groups';
@@ -22,7 +23,7 @@ import LabelPicker from './LabelPicker';
 import { inspectorCommit, useDraft } from './useDraft';
 
 const LOCATION_FIELDS = [
-  'name', 'kind', 'size', 'layer', 'notes', 'color', 'textColor', 'coordX', 'coordY', 'coordZ'
+  'name', 'kind', 'size', 'notes', 'color', 'textColor', 'coordX', 'coordY', 'coordZ'
 ] as const;
 
 const CONNECTION_FIELDS = [
@@ -36,7 +37,7 @@ const GROUP_FIELDS = ['name', 'color', 'textColor', 'notes', 'parentId'] as cons
 
 const LOCATION_LABEL_FIELDS = [
   'name', 'color', 'notes', 'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor',
-  'defaultLayer', 'defaultGroupId'
+  'defaultGroupId'
 ] as const;
 
 const CONNECTION_LABEL_FIELDS = [
@@ -153,24 +154,14 @@ function LocationInspector({ location }: { location: Location }) {
         <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
       </label>
 
-      <div className="row">
-        <label>
-          Shape
-          <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })}>
-            {SHAPE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Layer
-          <input
-            value={draft.layer}
-            placeholder="Floor 2, Downtown…"
-            onChange={(e) => setDraft({ ...draft, layer: e.target.value })}
-          />
-        </label>
-      </div>
+      <label>
+        Shape
+        <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })}>
+          {SHAPE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </label>
 
       <label>
         Size — Scale Relative To Every Other Location (1 = Normal)
@@ -474,7 +465,7 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
                 .filter((l) => !draft.requires.includes(l.id))
                 .map((l) => (
                   <option key={l.id} value={l.id}>
-                    {l.name || 'Unnamed Location'}{l.layer ? ` — ${l.layer}` : ''}
+                    {l.name || 'Unnamed Location'}
                   </option>
                 ))}
             </select>
@@ -644,7 +635,7 @@ function GroupInspector({ group }: { group: Group }) {
           <li key={l.id}>
             <button className="link" onClick={() => focusLocation(l.id, selectLocation)}>
               <span className="hit-title">{l.name || 'Unnamed Location'}</span>
-              <span className="muted small">{l.layer || 'No Layer'}</span>
+              <span className="muted small">{formatCoordinates(l) || '—'}</span>
             </button>
             <button className="icon danger" title="Remove From Grouping" onClick={() => void setLocationGroup(l.id, null)}>
               ✕
@@ -789,15 +780,6 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
           onChange={(defaultTextColor) => setDraft({ ...draft, defaultTextColor })}
         />
       </div>
-
-      <label>
-        Default Layer
-        <input
-          value={draft.defaultLayer}
-          placeholder="Blank = No Override"
-          onChange={(e) => setDraft({ ...draft, defaultLayer: e.target.value })}
-        />
-      </label>
 
       <div className="field">
         <span className="field-label">Default Grouping</span>
@@ -1180,10 +1162,6 @@ function MultiInspector({ ids }: { ids: string[] }) {
         Name
         <input value="" disabled placeholder="Not Editable For Multiple Rooms" />
       </label>
-      <label className="disabled-field">
-        Layer
-        <input value="" disabled placeholder="Not Editable For Multiple Rooms" />
-      </label>
 
       <label>
         Shape
@@ -1295,7 +1273,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
             <button className="link" onClick={() => selectLocation(l.id)}>
               <span className="hit-title">{l.name || 'Unnamed Location'}</span>
               <span className="muted small">
-                {[l.layer, l.groupId ? groups[l.groupId]?.name : null].filter(Boolean).join(' · ') || 'No Layer'}
+                {[formatCoordinates(l), l.groupId ? groups[l.groupId]?.name : null].filter(Boolean).join(' · ') || '—'}
               </span>
             </button>
           </li>

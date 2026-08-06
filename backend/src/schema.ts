@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS locations (
   kind         text        NOT NULL DEFAULT 'round-rectangle',
   -- scalar on the drawn box: 2 = twice as wide and tall as a default room
   size         double precision NOT NULL DEFAULT 1 CHECK (size > 0),
-  layer        text        NOT NULL DEFAULT '',
   notes        text        NOT NULL DEFAULT '',
   color        text        NOT NULL DEFAULT '',
   text_color   text        NOT NULL DEFAULT '',
@@ -112,7 +111,6 @@ CREATE TABLE IF NOT EXISTS location_labels (
   default_size        double precision CHECK (default_size IS NULL OR default_size > 0),
   default_color       text        NOT NULL DEFAULT '',   -- box fill
   default_text_color  text        NOT NULL DEFAULT '',
-  default_layer       text        NOT NULL DEFAULT '',
   default_group_id    uuid                 REFERENCES groups(id) ON DELETE SET NULL,
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()
@@ -156,6 +154,12 @@ CREATE TABLE IF NOT EXISTS connection_label_assignments (
   applied_at    timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (connection_id, label_id)
 );
+
+-- The free-form "layer" text field is gone: coordinates and groupings cover
+-- what it did. DROP COLUMN IF EXISTS is idempotent, so an existing database
+-- converges on next boot with no separate migration step.
+ALTER TABLE locations       DROP COLUMN IF EXISTS layer;
+ALTER TABLE location_labels DROP COLUMN IF EXISTS default_layer;
 
 CREATE INDEX IF NOT EXISTS groups_map_idx             ON groups(map_id);
 CREATE INDEX IF NOT EXISTS groups_parent_idx          ON groups(parent_id);

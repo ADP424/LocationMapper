@@ -12,7 +12,6 @@ const columns = (b: ReturnType<typeof locationCreate.parse>) => ({
   name: b.name,
   kind: b.kind,
   size: b.size,
-  layer: b.layer,
   notes: b.notes,
   color: b.color,
   text_color: b.textColor,

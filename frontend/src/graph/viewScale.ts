@@ -1,13 +1,57 @@
-import type { Core, EdgeSingular, NodeSingular } from 'cytoscape';
+import type { NodeSingular } from 'cytoscape';
 import type { Settings } from '../state/settings';
 
+/* ─────────────────────────────────────────────────────────── the zoom range */
+
+export const MIN_ZOOM = 2e-4;
+export const MAX_ZOOM = 8;
+
+/** Names never grow past 32× their natural size, so Fit always has a solution. */
+export const MAX_COMPENSATION = 32;
+
+/* ──────────────────────────────────────────────────────── render ceilings */
+
 /**
- * The *base* (un-zoomed, un-clamped) box of a node: the text box — shape metrics
- * and all — times the location's size scalar, times the global base size. Layouts,
- * the coordinate grid, the stacking areas and the extent model must all measure
- * with this, never with `node.width()`, which is drawn geometry.
+ * Cytoscape rasterises labels into 1024 px texture atlases; past ~900 px they
+ * re-render every frame. The ceiling is driven by the 24th-largest visible
+ * name, not the largest, so a handful of oversized names simply go uncached
+ * instead of shrinking everyone's.
  */
-export function baseSize(node: NodeSingular) {
+const MAX_RENDERED_LABEL = 900;
+export const OVERSIZE_TOLERANCE = 24;
+
+/** Quantisation ladder: 2^(1/16) ≈ 4.4 % rungs. Idempotent and cache-friendly. */
+const STEP = 1 / 16;
+
+export const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+const rung = (v: number) => (v <= 0 ? 0 : Math.pow(2, Math.round(Math.log2(v) / STEP) * STEP));
+const rungDown = (v: number) => (v <= 0 ? 0 : Math.pow(2, Math.floor(Math.log2(v) / STEP) * STEP));
+/** Quarter-octave buckets: panning must not jiggle the eased strength. */
+const bucket = (v: number) => (v <= 0 ? 0 : Math.pow(2, Math.round(Math.log2(v) * 4) / 4));
+
+/** Seeded into every element; names vanish below this rendered size, always. */
+export const FONT_MIN = { location: 6, portal: 6, group: 5, edge: 7 } as const;
+
+/** A size-1 location's base font (`style.ts`: `'font-size': 12 * tv`). The
+ *  skeleton's readability trigger is judged against this reference, not any
+ *  individual room's own size scalar. */
+const NAME_FONT = 12;
+
+/* ────────────────────────────────────────────────────────────── geometry */
+
+export interface Size {
+  w: number;
+  h: number;
+}
+
+/**
+ * The drawn box: shape metrics and the location's own size scalar, never Name
+ * Size, never the zoom. Boxes are text-fitted once, at build time, and never
+ * change again — layouts, the coordinate grid, hit-testing and the content
+ * extent all measure with this, never with `node.width()`, which used to be
+ * (and no longer needs to be distinguished from) drawn geometry.
+ */
+export function baseBox(node: NodeSingular): Size {
   const w = node.data('w');
   const h = node.data('h');
   return {
@@ -16,245 +60,169 @@ export function baseSize(node: NodeSingular) {
   };
 }
 
-export const MAX_COMPENSATED_ELEMENTS = 8_000;
-
-export function compensationInterval(elementCount: number) {
-  return Math.min(250, Math.max(16, Math.round(elementCount / 12)));
+/** The name's own plate, at Name Size 1 / compensation 1. Already carries the
+ *  location's size scalar and the current Name Size (baked in at build time). */
+export function namePlate(node: NodeSingular): Size {
+  const lw = node.data('lw');
+  const lh = node.data('lh');
+  return { w: typeof lw === 'number' ? lw : 0, h: typeof lh === 'number' ? lh : 0 };
 }
-
-export function viewScaleFactor(zoom: number, settings: Settings): number {
-  if (!settings.constantSize || settings.sizeCompensation <= 0) return 1;
-  const strength = Math.min(1, Math.max(0, settings.sizeCompensation));
-  const z = Math.min(8, Math.max(0.01, zoom));
-  return Math.pow(z, -strength);
-}
-
-/* ------------------------------------------------------- render ceilings */
 
 /**
- * Cytoscape renders elements and labels into 1024×1024 texture atlases and
- * re-renders anything larger from scratch on *every frame*; Chrome also stops
- * caching glyph rasters around 256 px and starts filling outlines. So nothing is
- * ever drawn bigger than this, whatever the size settings say. Slack is left for
- * borders and overlays, which the element's bounding box also includes.
+ * What a layout must reserve, per axis: the box or the name's plate, whichever
+ * is bigger. A room with a short name is box-bound; a 1× room under a 4× Name
+ * Size is name-bound, and a layout that measured only the box would let long
+ * names land on their neighbours.
  */
-const MAX_RENDERED_BOX = 900;
-const MAX_RENDERED_LABEL = 960;
-
-export interface GeometryBudget {
-  /** Largest drawn node box, base units — shape metrics and both scalars included. */
-  maxBox: number;
-  /** Longest *un-wrapped* label (connection and grouping names), base units. */
-  maxLabel: number;
+export function layoutSpan(node: NodeSingular): Size {
+  const box = baseBox(node);
+  const plate = namePlate(node);
+  return { w: Math.max(box.w, plate.w), h: Math.max(box.h, plate.h) };
 }
 
-export const EMPTY_BUDGET: GeometryBudget = { maxBox: 0, maxLabel: 0 };
+/* ───────────────────────────────────────────────────────────────── the solve */
 
-export interface RenderRatios {
-  /** Applied to every size-like property, so relative sizing is exact. */
-  box: number;
-  /** Applied to the labels no box contains. */
+export interface ViewBudget {
+  /** The OVERSIZE_TOLERANCE-th widest visible name, model units at factor 1. */
+  labelCeiling: number;
+  /** Visible elements that would draw a name. */
+  labelled: number;
+  /** Names this machine can draw per frame. Measured, not guessed. */
+  budget: number;
+}
+
+export const EMPTY_BUDGET: ViewBudget = { labelCeiling: 0, labelled: 0, budget: 1500 };
+
+export type ScaleLimit = 'none' | 'density' | 'skeleton' | 'ceiling' | 'texture';
+
+/** A location name below this many rendered pixels is not worth drawing —
+ *  the skeleton's readability trigger, checked against a *size-1* room so
+ *  Base Size and compensation alone decide it, never an individual room's
+ *  own size scalar. */
+export const NAME_MIN_PX = 6;
+/** Leaving the skeleton costs 15% more zoom than entering it — matches the
+ *  density hysteresis below, so neither rule can strobe on its own. */
+const SKELETON_HYSTERESIS = 1.15;
+/** A weight-1 connection's model width (see `weightToWidth(1)` in model.ts). */
+const REFERENCE_LINE_WIDTH = 3.5;
+
+/** How much of a grouping's own box its centred skeleton title may fill. */
+export const GROUP_NAME_FIT_W = 0.8;
+export const GROUP_NAME_FIT_H = 0.55;
+export const GROUP_NAME_MIN_PX = 11;
+export const GROUP_NAME_MAX_PX = 64;
+
+const rungUp = (v: number) => (v <= 0 ? 0 : Math.pow(2, Math.ceil(Math.log2(v) / STEP) * STEP));
+
+export interface ViewScale {
+  /** Multiplies every text-like property. Boxes never scale at runtime. */
   text: number;
+  /** Draw names at all. */
+  labels: boolean;
+  /** The far-zoom mode: names hidden, boxes faded, lines held readable,
+   *  grouping titles take over as the map's landmarks. One flag drives all
+   *  of it, so it cannot partially engage. */
+  skeleton: boolean;
+  /** Multiplies every connection's line width. Exactly 1 outside the skeleton. */
+  line: number;
+  /** What pulled the factor back, for the status bar. */
+  limit: ScaleLimit;
+  /** The compensation factor before the texture ratio. */
+  factor: number;
 }
 
-/** ~2 % steps, always rounding *down*, so a ceiling is never exceeded. */
-const quantise = (r: number) => (r >= 1 ? 1 : Math.pow(2, Math.floor(Math.log2(r) * 32) / 32));
-
-/**
- * One ratio for the whole graph, so a size-5 room that hits the ceiling leaves a
- * size-1 room at exactly a fifth of it — and a star, which is `2.7×` its text box,
- * hits the ceiling before a rectangle with the same label does.
- *
- * A node's label is strictly inside its box (`w = textW·wFactor + padX`, with
- * `wFactor ≥ 1`), so bounding the box bounds the label texture too. Connection and
- * grouping names are inside nothing, hence the second ratio.
- */
-export function renderRatios(zoom: number, f: number, budget: GeometryBudget): RenderRatios {
-  const scale = Math.max(1e-9, f * zoom); // base units -> rendered px
-  const box = budget.maxBox * scale;
-  const label = budget.maxLabel * scale;
-
-  const r = box > MAX_RENDERED_BOX ? quantise(MAX_RENDERED_BOX / box) : 1;
-  const t = label > 0 ? Math.min(r, quantise(MAX_RENDERED_LABEL / label)) : r;
-  return { box: r, text: t };
-}
-
-/* --------------------------------------------------------------- the pass */
-
-const VIEWPORT_PAD = 0.5;
-const GENERATION = '_mgScale';
-
-const FONT = { location: 12, portal: 10, group: 15, edge: 11 };
-const MIN_FONT = { location: 6, portal: 6, group: 5, edge: 7 };
-
-const sizeOf = (data: Record<string, unknown>) => {
-  const s = data.size;
-  return typeof s === 'number' && s > 0 ? s : 1;
+export const IDENTITY_SCALE: ViewScale = {
+  text: 1,
+  labels: true,
+  skeleton: false,
+  line: 1,
+  limit: 'none',
+  factor: 1
 };
 
-const generations = new WeakMap<Core, { key: string; gen: number }>();
-function generationFor(cy: Core, key: string) {
-  const current = generations.get(cy);
-  if (current && current.key === key) return current.gen;
-  const gen = (current?.gen ?? 0) + 1;
-  generations.set(cy, { key, gen });
-  return gen;
-}
+export const scaleKey = (s: ViewScale) =>
+  `${s.text}|${s.labels ? 1 : 0}|${s.skeleton ? 1 : 0}|${s.line}`;
 
-interface Extent {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-function paddedExtent(cy: Core): Extent {
-  const e = cy.extent();
-  const px = e.w * VIEWPORT_PAD;
-  const py = e.h * VIEWPORT_PAD;
-  return { x1: e.x1 - px, x2: e.x2 + px, y1: e.y1 - py, y2: e.y2 + py };
-}
-
-const halfBox = (node: NodeSingular, f: number) => {
-  const w = node.data('w');
-  const h = node.data('h');
-  return {
-    hw: ((typeof w === 'number' ? w : 0) * f) / 2,
-    hh: ((typeof h === 'number' ? h : 0) * f) / 2
-  };
-};
-
-function nodeNear(node: NodeSingular, f: number, near: Extent) {
-  const p = node.position();
-  const { hw, hh } = halfBox(node, f);
-  return p.x + hw > near.x1 && p.x - hw < near.x2 && p.y + hh > near.y1 && p.y - hh < near.y2;
-}
-
-function edgeNear(edge: EdgeSingular, f: number, near: Extent) {
-  const s = edge.source();
-  const t = edge.target();
-  const sp = s.position();
-  const tp = t.position();
-  const sb = halfBox(s, f);
-  const tb = halfBox(t, f);
-  return (
-    Math.max(sp.x + sb.hw, tp.x + tb.hw) > near.x1 &&
-    Math.min(sp.x - sb.hw, tp.x - tb.hw) < near.x2 &&
-    Math.max(sp.y + sb.hh, tp.y + tb.hh) > near.y1 &&
-    Math.min(sp.y - sb.hh, tp.y - tb.hh) < near.y2
-  );
-}
-
-export interface ViewScaleOptions {
-  /** Restyle only what is near the viewport; everything else is reported stale. */
-  viewportOnly?: boolean;
-  /** Drop the render ceilings — layouts read the true drawn geometry. */
-  unclamped?: boolean;
+/** The compensation factor on names. Monotone in zoom, which `fitZoom` needs. */
+export function textFactorAt(zoom: number, settings: Settings): number {
+  if (!settings.constantSize) return 1;
+  const s = clamp(settings.sizeCompensation, 0, 1);
+  if (!s) return 1;
+  return Math.min(MAX_COMPENSATION, Math.pow(clamp(zoom, MIN_ZOOM, MAX_ZOOM), -s));
 }
 
 /**
- * Write the `…View` twin of every size-like property.
+ * Compensation strength, eased toward 0 as the viewport fills with names.
  *
- * `w`/`h`, `lineWidth` and `labelWidth` already carry the per-room scalar and the
- * global base size, baked into the element data so the layouts space the boxes
- * they will draw. Everything here is multiplied by the compensation factor and by
- * the global render ratio, which is what keeps the relative sizes exact.
- *
- * @returns how many elements were skipped as off-screen and left stale.
+ * Holding names at a constant screen size is what *defeats* level-of-detail:
+ * `min-zoomed-font-size` compares `fontSize × zoom`, which compensation holds
+ * constant by construction, so nothing ever culls. The cure is to hand LOD
+ * back exactly when it is needed — smoothly, in log space, so nothing snaps.
  */
-export function applyViewScale(
-  cy: Core,
-  f: number,
+function easedStrength(settings: Settings, b: ViewBudget) {
+  const requested = settings.constantSize ? clamp(settings.sizeCompensation, 0, 1) : 0;
+  if (!requested) return { s: 0, eased: false };
+  const drawn = bucket(b.labelled);
+  if (drawn <= b.budget) return { s: requested, eased: false };
+  const hard = b.budget * 4;
+  if (drawn >= hard) return { s: 0, eased: true };
+  return { s: requested * (Math.log(hard / drawn) / Math.log(4)), eased: true };
+}
+
+export function solveViewScale(
+  zoom: number,
   settings: Settings,
-  budget: GeometryBudget,
-  opts: ViewScaleOptions = {}
-): number {
-  const cull = settings.hideSmallLabels;
-  const base = Math.max(0.05, settings.baseScale);
-  const unclamped = opts.unclamped === true;
-  const ratios: RenderRatios = unclamped ? { box: 1, text: 1 } : renderRatios(cy.zoom(), f, budget);
+  b: ViewBudget,
+  previous: ViewScale = IDENTITY_SCALE
+): ViewScale {
+  const z = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+  const { s, eased } = easedStrength(settings, b);
+  let limit: ScaleLimit = eased ? 'density' : 'none';
 
-  const gen = generationFor(cy, `${f}|${ratios.box}|${ratios.text}|${base}|${cull ? 1 : 0}`);
-  const near = opts.viewportOnly ? paddedExtent(cy) : null;
-  let stale = 0;
+  let f = s <= 0 ? 1 : Math.pow(z, -s);
+  if (f > 1) {
+    if (f > MAX_COMPENSATION) {
+      f = MAX_COMPENSATION;
+      limit = 'ceiling';
+    }
+    f = rung(f);
+  }
 
-  cy.batch(() => {
-    cy.nodes().forEach((n) => {
-      if (n.scratch(GENERATION) === gen) return;
+  /* label widths in element data are pre-multiplied by size × Name Size, so
+     the rendered width is exactly labelCeiling × f × z */
+  let ratio = 1;
+  const drawn = b.labelCeiling * f * z;
+  if (drawn > MAX_RENDERED_LABEL) {
+    ratio = rungDown(MAX_RENDERED_LABEL / drawn);
+    limit = 'texture';
+  }
+  const text = f * ratio;
 
-      const d = n.data();
-      /* a brand-new element has no `…View` at all and must never be deferred */
-      const initialised = typeof d.fontView === 'number';
-      if (near && initialised && typeof d.w === 'number' && !nodeNear(n, f, near)) {
-        stale++;
-        return;
-      }
+  /* 15% hysteresis, or a map sitting on the threshold would strobe */
+  const labels = previous.labels ? b.labelled <= b.budget * 1.15 : b.labelled <= b.budget * 0.85;
+  if (!labels && limit === 'none') limit = 'density';
 
-      const isGroup = d.kind === 'group';
-      const isPortal = d.portalSide !== undefined;
-      /* one scalar for the box and everything drawn inside it */
-      const k = sizeOf(d) * base * f * ratios.box;
+  /* ── the skeleton transition ──────────────────────────────────────────
+     One boolean drives everything below it: names hiding, boxes fading and
+     lines thickening all read this same flag out of the same solved scale,
+     so they land in the same batched write and cannot drift apart by a
+     frame. It fires on either of two independent, hysteretic conditions:
+     a size-1 room's name has become too small to read, or there are simply
+     too many names to draw at all (the existing density rule). */
+  const refFont = NAME_FONT * settings.baseScale * text * z;
+  const tooSmall = previous.skeleton ? refFont < NAME_MIN_PX * SKELETON_HYSTERESIS : refFont < NAME_MIN_PX;
+  const skeleton = settings.skeletonView && (tooSmall || !labels);
 
-      const view: Record<string, number> = {
-        /* a grouping's name is bounded by nothing, so it takes the label ratio */
-        fontView: isGroup
-          ? FONT.group * base * f * ratios.text
-          : (isPortal ? FONT.portal : FONT.location) * k,
-        minFontView: cull
-          ? isGroup
-            ? MIN_FONT.group
-            : isPortal
-              ? MIN_FONT.portal
-              : MIN_FONT.location
-          : 0,
-        textMarginYView: (d.textMarginY ?? 0) * k,
-        borderView: (isGroup ? 2 : isPortal ? 1.5 : d.hasNotes ? 5 : 2) * k,
-        borderStrongView: 5 * k,
-        borderNeighbourView: 4 * k
-      };
+  /* a weight-1 line renders at exactly `skeletonLineWidth`; every other
+     weight keeps its ratio to it; nothing already thicker than the floor is
+     ever made thinner, so the transition never looks like a glitch */
+  const line = skeleton
+    ? Math.max(1, rungUp(settings.skeletonLineWidth / (REFERENCE_LINE_WIDTH * z)))
+    : 1;
 
-      if (typeof d.w === 'number' && typeof d.h === 'number') {
-        view.wView = d.w * f * ratios.box;
-        view.hView = d.h * f * ratios.box;
-      }
-      if (typeof d.textMaxWidth === 'number') view.textMaxWidthView = d.textMaxWidth * k;
-      if (isGroup) {
-        view.paddingView = 30 * base * f * ratios.box;
-        view.groupLabelOffsetView = -8 * base * f * ratios.text;
-      }
+  /* the skeleton is a strictly more specific state than the plain density
+     cull that can itself trigger it — it should always win the status chip */
+  if (skeleton) limit = 'skeleton';
 
-      n.data(view);
-      n.scratch(GENERATION, gen);
-    });
-
-    const edgeFont = FONT.edge * base * f * ratios.text;
-    const edgeMinFont = cull ? MIN_FONT.edge : 0;
-
-    cy.edges().forEach((e) => {
-      if (e.scratch(GENERATION) === gen) return;
-
-      const raw = e.data('lineWidth');
-      const initialised = typeof e.data('lineWidthView') === 'number';
-      if (near && initialised && !edgeNear(e, f, near)) {
-        stale++;
-        return;
-      }
-
-      const lineWidth = (typeof raw === 'number' ? raw : 2 * base) * f * ratios.box;
-      e.data({
-        lineWidthView: lineWidth,
-        lineWidthHlView: lineWidth + 2 * base * f * ratios.box,
-        fontView: edgeFont,
-        minFontView: edgeMinFont
-      });
-      e.scratch(GENERATION, gen);
-    });
-  });
-
-  return stale;
-}
-
-/** The reconcile calls this for any element whose own geometry changed. */
-export function invalidateViewScale(ele: { removeScratch(ns: string): unknown }) {
-  ele.removeScratch(GENERATION);
+  return { text, labels: labels && !skeleton, skeleton, line, limit, factor: f };
 }

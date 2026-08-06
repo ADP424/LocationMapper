@@ -1,6 +1,15 @@
 import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { DRAG_LABELS, DRAG_MODES, type DragMode } from '../state/settings';
+import {
+  BASE_SCALE_RANGE,
+  DRAG_LABELS,
+  DRAG_MODES,
+  EPHEMERAL_LABELS,
+  EPHEMERAL_STYLES,
+  SKELETON_LINE_WIDTH_RANGE,
+  type DragMode,
+  type EphemeralStyle
+} from '../state/settings';
 import { useGraphStore } from '../state/store';
 import { pushEscapeHandler } from '../utils/escapeStack';
 import { useFocusTrap } from './useFocusTrap';
@@ -102,13 +111,13 @@ export default function SettingsModal() {
         <section className="modal-section">
           <h3>
             Base Size
-            <Help text="Scales every location and connection, independent of zoom. 2 = twice the natural size. Layouts space for it, so re-layout after changing it." />
+            <Help text="Scales every name — locations, connections, groupings. Boxes keep their natural size; names sit on a plate in the box's colour so they stay readable. Layouts leave room for the bigger names, so re-layout after changing it." />
           </h3>
           <div className="slider-row">
             <input
               type="range"
-              min={0.25}
-              max={32}
+              min={BASE_SCALE_RANGE[0]}
+              max={BASE_SCALE_RANGE[1]}
               step={0.25}
               value={settings.baseScale}
               onChange={(e) => setSettings({ baseScale: Number(e.target.value) })}
@@ -116,8 +125,8 @@ export default function SettingsModal() {
             <input
               className="num"
               type="number"
-              min={0.25}
-              max={32}
+              min={BASE_SCALE_RANGE[0]}
+              max={BASE_SCALE_RANGE[1]}
               step={0.25}
               value={settings.baseScale}
               onChange={(e) => setSettings({ baseScale: Number(e.target.value) })}
@@ -128,7 +137,7 @@ export default function SettingsModal() {
         <section className="modal-section">
           <h3>
             Zoom-Independent Sizing
-            <Help text="Keeps boxes and names the same size on screen while you zoom. 1.00 = exactly constant, 0.00 = scales normally. It re-styles every element on each zoom step, so it is rate-limited on big maps and pauses itself past ~8,000 elements." />
+            <Help text="Keeps names the same size on screen while you zoom — boxes always scale with the zoom. Names that would pile up too densely are hidden automatically." />
           </h3>
           <div className="slider-row">
             <input
@@ -160,14 +169,56 @@ export default function SettingsModal() {
 
         <section className="modal-section">
           <h3>
-            Hide Tiny Text
-            <Help text="Drops names once they would render too small to read. Turn it off to always draw them, however far out you scroll — slower on very large maps." />
+            Zoomed-Out Skeleton
+            <Help text="Past the zoom where a size-1 room's name stops being legible, the map flips to its skeleton: rooms and names fade out, grouping names appear centred in their boxes, and connection lines hold a constant on-screen thickness so the map's broad shape and direction stay visible. The flip happens at one instant for all three. Turn it off to let everything fade away with nothing to replace it." />
           </h3>
-          <InlineCheckField
-            label="Enabled"
-            checked={settings.hideSmallLabels}
-            onChange={(v) => setSettings({ hideSmallLabels: v })}
-          />
+          <div className="slider-row">
+            <input
+              type="range"
+              min={SKELETON_LINE_WIDTH_RANGE[0]}
+              max={SKELETON_LINE_WIDTH_RANGE[1]}
+              step={0.25}
+              disabled={!settings.skeletonView}
+              value={settings.skeletonLineWidth}
+              onChange={(e) => setSettings({ skeletonLineWidth: Number(e.target.value) })}
+            />
+            <input
+              className="num"
+              type="number"
+              min={SKELETON_LINE_WIDTH_RANGE[0]}
+              max={SKELETON_LINE_WIDTH_RANGE[1]}
+              step={0.25}
+              disabled={!settings.skeletonView}
+              value={settings.skeletonLineWidth}
+              onChange={(e) => setSettings({ skeletonLineWidth: Number(e.target.value) })}
+            />
+            <InlineCheckField
+              label="Enabled"
+              checked={settings.skeletonView}
+              onChange={(v) => setSettings({ skeletonView: v })}
+            />
+          </div>
+          <p className="muted small">Line Thickness In Pixels — A Weight-1 Connection Is Drawn At Exactly This.</p>
+        </section>
+
+        <section className="modal-section">
+          <h3>
+            Ephemeral Connections
+            <Help text="Detached stubs draw a labelled box near each room. Arrows draw only a short line into space, with the description on the line — less clutter on dense maps. Either way the ends stay draggable and keep their saved offsets, and the connection's name rides the line in italics." />
+          </h3>
+          <label>
+            Display As
+            <select
+              value={settings.ephemeralStyle}
+              onChange={(e) => setSettings({ ephemeralStyle: e.target.value as EphemeralStyle })}
+            >
+              {EPHEMERAL_STYLES.map((m) => (
+                <option key={m} value={m}>
+                  {EPHEMERAL_LABELS[m]}
+                </option>
+              ))}
+            </select>
+          </label>
         </section>
 
         <section className="modal-section">

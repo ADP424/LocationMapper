@@ -36,7 +36,6 @@ export interface Location {
   kind: string;
   /** Scalar on the drawn box, relative to every other location. */
   size: number;
-  layer: string;
   notes: string;
   color: string;
   textColor: string;
@@ -89,7 +88,6 @@ export interface LocationLabel {
   defaultSize: number | null;
   defaultColor: string;
   defaultTextColor: string;
-  defaultLayer: string;
   defaultGroupId: string | null;
   createdAt: string;
   updatedAt: string;

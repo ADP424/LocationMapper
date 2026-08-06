@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { cyHolder } from '../graph/cyHolder';
-import { drawnExtentAt, drawnExtentModel, type ExtentModel } from '../graph/extent';
-import { viewScaleFactor } from '../graph/viewScale';
+import { drawnExtentAt, extentModel, invalidateExtent, type ExtentModel } from '../graph/extent';
+import { textFactorAt } from '../graph/viewScale';
 import { useGraphStore } from '../state/store';
 
 interface Bar {
@@ -45,14 +45,15 @@ export default function GraphScrollbars() {
     let contentTimer: ReturnType<typeof setTimeout> | null = null;
 
     const readContent = () => {
-      modelRef.current = drawnExtentModel(cy, settings.baseScale, settings);
+      invalidateExtent(cy);
+      modelRef.current = extentModel(cy, settings);
     };
 
     const update = () => {
       frame = 0;
       const ext = cy.extent();
       const m = modelRef.current;
-      const bb = m ? drawnExtentAt(m, viewScaleFactor(cy.zoom(), settings)) : ext;
+      const bb = m ? drawnExtentAt(m, textFactorAt(cy.zoom(), settings)) : ext;
 
       /* track = content plus a margin, stretched only as far as the viewport
          has wandered beyond it */
@@ -100,12 +101,14 @@ export default function GraphScrollbars() {
 
     readContent();
     cy.on('viewport', schedule);
-    cy.on('add remove position mapgraphgeometry', remeasure);
+    /* `position` fires once per node per frame during an animated layout —
+       remeasure on the coarser events that actually mean geometry settled */
+    cy.on('add remove dragfree layoutstop mapgraphgeometry', remeasure);
     schedule();
 
     return () => {
       cy.off('viewport', schedule);
-      cy.off('add remove position mapgraphgeometry', remeasure);
+      cy.off('add remove dragfree layoutstop mapgraphgeometry', remeasure);
       if (frame) cancelAnimationFrame(frame);
       if (contentTimer) clearTimeout(contentTimer);
     };
@@ -126,7 +129,7 @@ export default function GraphScrollbars() {
     const cy = cyHolder.cy!;
     const ext = cy.extent();
     const m = modelRef.current;
-    const bb = m ? drawnExtentAt(m, viewScaleFactor(cy.zoom(), settings)) : ext;
+    const bb = m ? drawnExtentAt(m, textFactorAt(cy.zoom(), settings)) : ext;
     const span = axis === 'x' ? ext.w : ext.h;
     /* the same margin the track shows is also genuinely scrollable */
     const pad = span * EDGE_PAD;

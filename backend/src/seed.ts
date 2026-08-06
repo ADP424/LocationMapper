@@ -21,22 +21,21 @@ export async function seedDemoMap() {
       group: string | null;
       kind: string;
       size: number;
-      layer: string;
       notes: string;
       visited: boolean;
       x: number;
       y: number;
     }> = [
       /* spaced for the default Base Size of 2 */
-      { name: 'Hotel Lobby', group: hotel, kind: 'round-rectangle', size: 1.4, layer: 'Ground',
+      { name: 'Hotel Lobby', group: hotel, kind: 'round-rectangle', size: 1.4,
         notes: 'Start here. The front desk holds the luggage.', visited: true, x: 0, y: 0 },
-      { name: 'Hotel Room 214', group: hotel, kind: 'round-rectangle', size: 1, layer: 'Floor 2',
+      { name: 'Hotel Room 214', group: hotel, kind: 'round-rectangle', size: 1,
         notes: 'The ephemeral link models the elevator.', visited: false, x: 500, y: -300 },
-      { name: 'Rental Car Desk', group: null, kind: 'diamond', size: 1, layer: 'Ground',
+      { name: 'Rental Car Desk', group: null, kind: 'diamond', size: 1,
         notes: 'You must pick up the keys before you can drive.', visited: false, x: 1120, y: 300 },
-      { name: 'Parking Garage', group: null, kind: 'hexagon', size: 1, layer: 'Underground',
+      { name: 'Parking Garage', group: null, kind: 'hexagon', size: 1,
         notes: 'Level -1, spot C14.', visited: false, x: 1800, y: 300 },
-      { name: 'Airport Terminal B', group: null, kind: 'star', size: 2, layer: 'City',
+      { name: 'Airport Terminal B', group: null, kind: 'star', size: 2,
         notes: 'Forty minute drive.', visited: false, x: 2480, y: 120 }
     ];
 
@@ -45,9 +44,9 @@ export async function seedDemoMap() {
       id.set(
         r.name,
         await insert(
-          `INSERT INTO locations (map_id, group_id, name, kind, size, layer, notes, visited, x, y)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-          [mapId, r.group, r.name, r.kind, r.size, r.layer, r.notes, r.visited, r.x, r.y]
+          `INSERT INTO locations (map_id, group_id, name, kind, size, notes, visited, x, y)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+          [mapId, r.group, r.name, r.kind, r.size, r.notes, r.visited, r.x, r.y]
         )
       );
     }

@@ -1,6 +1,6 @@
 import type { Core } from 'cytoscape';
 import type { Connection, Location } from '../types';
-import { baseSize } from './viewScale';
+import { layoutSpan } from './viewScale';
 
 export type CoordinatePlane = 'xy' | 'xz' | 'yz';
 export type Axis = 'x' | 'y' | 'z';
@@ -211,7 +211,9 @@ export function computeCoordinateLayout(
 
   const size = new Map<string, { w: number; h: number }>();
   nodes.forEach((n) => {
-    const b = baseSize(n);
+    /* the cell has to hold the name plate too, or a grid of 1x rooms with long
+       names at a high Base Size would be a grid of overlapping plates */
+    const b = layoutSpan(n);
     size.set(n.id(), { w: Math.max(b.w, 40), h: Math.max(b.h, 30) });
   });
 
@@ -465,7 +467,7 @@ export function computeCoordinateLayout(
         }
       }
 
-      const pb = baseSize(p);
+      const pb = layoutSpan(p);
       const s = { w: Math.max(pb.w, 40), h: Math.max(pb.h, 24) };
       const spot = findSpot(
         index,

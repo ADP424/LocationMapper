@@ -178,6 +178,7 @@ interface Store {
   deleteSelection: () => Promise<void>;
 
   queuePosition: (id: string, x: number, y: number) => void;
+  queuePositions: (list: Array<{ id: string; x: number; y: number }>) => void;
   queuePortalOffset: (portalId: string, dx: number, dy: number) => void;
   flushPositions: () => Promise<void>;
   persistLayoutPositions: (
@@ -1042,6 +1043,19 @@ export const useGraphStore = create<Store>()((set, get) => {
     /* --------------------------------------------------- layout saving */
     queuePosition: (id, x, y) => {
       set((s) => ({ pendingPositions: { ...s.pendingPositions, [id]: { x, y } } }));
+      if (positionTimer) clearTimeout(positionTimer);
+      positionTimer = setTimeout(() => void get().flushPositions(), 600);
+    },
+
+    /* a multi-drag calling `queuePosition` once per node does an object spread
+       per node — O(N²) for N moved nodes. Batch them into one spread instead. */
+    queuePositions: (list) => {
+      if (!list.length) return;
+      set((s) => {
+        const pendingPositions = { ...s.pendingPositions };
+        for (const p of list) pendingPositions[p.id] = { x: p.x, y: p.y };
+        return { pendingPositions };
+      });
       if (positionTimer) clearTimeout(positionTimer);
       positionTimer = setTimeout(() => void get().flushPositions(), 600);
     },

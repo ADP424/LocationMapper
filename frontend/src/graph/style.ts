@@ -1,3 +1,4 @@
+import type { NodeSingular, EdgeSingular } from 'cytoscape';
 import { PALETTE } from './model';
 
 /**
@@ -14,6 +15,14 @@ const Z = {
   handle: 1_400_000
 };
 
+type Ele = NodeSingular | EdgeSingular;
+
+/** `tView` scales every text-like property. Boxes are static — never scaled at runtime. */
+const tv = (ele: Ele) => (ele.data('tView') as number) || 1;
+/** The skeleton's line-width multiplier — 1 outside it. */
+const lv = (ele: Ele) => (ele.data('lineView') as number) || 1;
+const lineW = (e: EdgeSingular) => ((e.data('lineWidth') as number) || 2) * lv(e);
+
 /** Ordering matters: Cytoscape resolves conflicts by *last matching rule*. */
 export const graphStyle: any[] = [
   /* -------------------------------------------------------- groupings */
@@ -24,23 +33,51 @@ export const graphStyle: any[] = [
       'background-color': 'data(fill)',
       'background-opacity': 'data(groupFillOpacity)',
       'border-color': 'data(border)',
-      'border-width': 'data(borderView)',
+      'border-width': 2,
       'border-opacity': 'data(groupBorderOpacity)',
       /* stacking order among groupings; `z-compound-depth: bottom` keeps the
          whole band under every room, so this only orders the boxes */
       'z-index': 'data(zLayer)',
-      padding: 'data(paddingView)',
+      padding: 30,
       label: 'data(label)',
       color: 'data(textColor)',
-      'font-size': 'data(fontView)',
+      'font-size': (e: NodeSingular) => 15 * tv(e),
       'font-weight': 'bold',
       'text-valign': 'top',
       'text-halign': 'center',
-      'text-margin-y': 'data(groupLabelOffsetView)',
+      'text-margin-y': (e: NodeSingular) => -8 * tv(e),
+      /* the title sits over whatever the box overlaps, so it gets a plate too */
+      'text-background-color': 'data(fill)',
+      'text-background-opacity': 0.92,
+      'text-background-shape': 'roundrectangle',
+      'text-background-padding': (e: NodeSingular) => 4 * tv(e),
+      'text-border-width': (e: NodeSingular) => 1 * tv(e),
+      'text-border-color': 'data(border)',
+      'text-border-opacity': 0.6,
       'min-zoomed-font-size': 'data(minFontView)',
       'z-compound-depth': 'bottom',
       'transition-property': 'border-color, background-opacity, opacity',
       'transition-duration': '120ms'
+    }
+  },
+  /* ── the skeleton view ──────────────────────────────────────────────────
+     Once names and rooms are gone, a grouping's title is the only landmark
+     left, so it moves to the box's centre and is fitted to it (ViewScaler
+     writes `tView` sized for that fit). Placed after the base rule above so
+     it wins every property it sets; placed before the selection/highlight
+     rules further down so a selected grouping still gets its amber border. */
+  {
+    selector: 'node.group.skel',
+    style: {
+      'text-valign': 'center',
+      'text-halign': 'center',
+      'text-margin-y': 0,
+      'border-width': 3,
+      /* the only readable thing left, so it's boosted against the canvas */
+      'background-opacity': (e: NodeSingular) =>
+        Math.min(0.55, ((e.data('groupFillOpacity') as number) || 0.2) * 1.6),
+      'transition-property': 'background-opacity, border-width, text-valign, text-margin-y',
+      'transition-duration': '140ms'
     }
   },
 
@@ -49,25 +86,46 @@ export const graphStyle: any[] = [
     selector: 'node.location',
     style: {
       shape: 'data(shape)',
-      width: 'data(wView)',
-      height: 'data(hView)',
+      width: 'data(w)',
+      height: 'data(h)',
       'background-color': 'data(fill)',
+      /* the skeleton hides the box itself but keeps the node (and its edges)
+         drawing — `opacity: 0` would take the connections down with it */
+      'background-opacity': (e: NodeSingular) => (e.data('skel') ? 0 : 1),
       'border-color': 'data(border)',
-      'border-width': 'data(borderView)',
-      /* draw order: off-plane coordinate, or biggest box first */
+      'border-width': (e: NodeSingular) => (e.data('skel') ? 0 : e.data('hasNotes') ? 5 : 2),
+      /* draw order: off-plane coordinate, or biggest footprint first */
       'z-index': 'data(zLayer)',
       label: 'data(label)',
       color: 'data(textColor)',
       'text-wrap': 'wrap',
-      'text-max-width': 'data(textMaxWidthView)',
-      'text-margin-y': 'data(textMarginYView)',
+      'text-max-width': (e: NodeSingular) => Math.max(1, (e.data('textMaxWidth') || 0) * tv(e)),
+      'text-margin-y': (e: NodeSingular) => (e.data('textMarginY') || 0) * tv(e),
       'text-valign': 'center',
       'text-halign': 'center',
-      'font-size': 'data(fontView)',
+      'font-size': (e: NodeSingular) => 12 * tv(e),
       'font-family': 'Inter, system-ui, sans-serif',
+      /* ── the name plate ──────────────────────────────────────────────
+         A name drawn larger than its room would be illegible the moment two
+         of them crossed. So it is drawn on an opaque plate in the room's own
+         colour: overlapping names *occlude* each other instead of
+         interleaving into noise, and the draw order (biggest footprint
+         underneath) decides who wins. The thin border keeps two same-
+         coloured plates from visually merging into one shape. */
+      'text-background-color': 'data(fill)',
+      'text-background-opacity': 1,
+      'text-background-shape': 'roundrectangle',
+      'text-background-padding': (e: NodeSingular) => 4 * tv(e),
+      'text-border-width': (e: NodeSingular) => 1 * tv(e),
+      'text-border-color': 'data(border)',
+      'text-border-opacity': 0.55,
       'min-zoomed-font-size': 'data(minFontView)',
-      'transition-property': 'border-color, opacity',
-      'transition-duration': '120ms'
+      /* the name is part of the room: clicking, dragging or right-clicking it
+         — or its plate — hits the node, which matters now that names routinely
+         outgrow their box */
+      'text-events': 'yes',
+      'transition-property': 'border-color, opacity, background-opacity, border-width',
+      'transition-duration': '140ms'
     }
   },
   { selector: 'node.location.has-notes', style: { 'border-style': 'double' } },
@@ -77,24 +135,34 @@ export const graphStyle: any[] = [
     selector: 'node.portal',
     style: {
       shape: 'tag',
-      width: 'data(wView)',
-      height: 'data(hView)',
+      width: 'data(w)',
+      height: 'data(h)',
       'background-color': '#ffffff',
-      'background-opacity': 0.96,
-      'border-width': 'data(borderView)',
+      'background-opacity': (e: NodeSingular) => (e.data('skel') ? 0 : 0.96),
+      'border-width': (e: NodeSingular) => (e.data('skel') ? 0 : 1.5),
       'border-style': 'dashed',
       'border-color': 'data(lineColor)',
       /* a stub shares its anchor room's layer */
       'z-index': 'data(zLayer)',
       label: 'data(label)',
       color: 'data(lineColor)',
-      'font-size': 'data(fontView)',
+      'font-size': (e: NodeSingular) => 10 * tv(e),
       'font-style': 'italic',
       'text-valign': 'center',
       'text-halign': 'center',
       'text-wrap': 'wrap',
-      'text-max-width': 'data(textMaxWidthView)',
-      'min-zoomed-font-size': 'data(minFontView)'
+      'text-max-width': (e: NodeSingular) => Math.max(1, (e.data('textMaxWidth') || 0) * tv(e)),
+      'text-background-color': '#ffffff',
+      'text-background-opacity': 0.96,
+      'text-background-shape': 'roundrectangle',
+      'text-background-padding': (e: NodeSingular) => 4 * tv(e),
+      'text-border-width': (e: NodeSingular) => 1 * tv(e),
+      'text-border-color': 'data(lineColor)',
+      'text-border-opacity': 0.7,
+      'min-zoomed-font-size': 'data(minFontView)',
+      'text-events': 'yes',
+      'transition-property': 'background-opacity, border-width',
+      'transition-duration': '140ms'
     }
   },
 
@@ -102,7 +170,7 @@ export const graphStyle: any[] = [
   {
     selector: 'edge',
     style: {
-      width: 'data(lineWidthView)',
+      width: lineW,
       'line-color': 'data(lineColor)',
       'line-style': 'data(lineStyle)',
       'target-arrow-color': 'data(lineColor)',
@@ -113,26 +181,38 @@ export const graphStyle: any[] = [
       'curve-style': 'bezier',
       label: 'data(label)',
       color: 'data(textColor)',
-      'font-size': 'data(fontView)',
+      'font-size': (e: EdgeSingular) => 11 * tv(e),
       'text-background-color': '#f2f5fa',
-      'text-background-opacity': 0.88,
-      'text-background-padding': '2px',
+      'text-background-opacity': 0.95,
       'text-background-shape': 'roundrectangle',
+      'text-background-padding': (e: EdgeSingular) => 3 * tv(e),
+      'text-border-width': (e: EdgeSingular) => 1 * tv(e),
+      'text-border-color': 'data(lineColor)',
+      'text-border-opacity': 0.45,
       'text-rotation': 'autorotate',
       'min-zoomed-font-size': 'data(minFontView)',
-      'transition-property': 'line-color, opacity',
-      'transition-duration': '120ms'
+      /* a connection's name plate selects the connection */
+      'text-events': 'yes',
+      /* the skeleton's thickening is a mode change, not a per-frame effect —
+         let the user see the line grow rather than snap */
+      'transition-property': 'line-color, opacity, width',
+      'transition-duration': '140ms'
     }
   },
-  /* stubs keep their own geometry but NOT their own colour or dash pattern */
-  { selector: 'edge.stub', style: { 'curve-style': 'straight', 'arrow-scale': 1 } },
+  /* stubs keep their own geometry but NOT their own colour or dash pattern;
+     the connection's name rides the line, italic, in both ephemeral modes —
+     the cue that this is a link to elsewhere, not a room */
+  {
+    selector: 'edge.stub',
+    style: { 'curve-style': 'straight', 'arrow-scale': 1, 'font-style': 'italic' }
+  },
 
   /* ------------------------------------------------- selection states */
   {
     selector: 'node:selected',
     style: {
       'border-color': PALETTE.multiSelect,
-      'border-width': 'data(borderStrongView)',
+      'border-width': 5,
       'overlay-color': PALETTE.multiSelect,
       'overlay-opacity': 0.1,
       'overlay-padding': 5
@@ -148,7 +228,7 @@ export const graphStyle: any[] = [
     selector: 'node.route-node',
     style: {
       'border-color': PALETTE.route,
-      'border-width': 'data(borderStrongView)',
+      'border-width': 5,
       'z-index': Z.route
     }
   },
@@ -158,7 +238,7 @@ export const graphStyle: any[] = [
       'line-color': PALETTE.route,
       'target-arrow-color': PALETTE.route,
       'source-arrow-color': PALETTE.route,
-      width: 'data(lineWidthHlView)',
+      width: (e: EdgeSingular) => lineW(e) + 2,
       'z-index': Z.route
     }
   },
@@ -170,7 +250,7 @@ export const graphStyle: any[] = [
     selector: 'node.hl-neighbor',
     style: {
       'border-color': PALETTE.neighbour,
-      'border-width': 'data(borderNeighbourView)',
+      'border-width': 4,
       'z-index': Z.neighbour
     }
   },
@@ -187,7 +267,7 @@ export const graphStyle: any[] = [
     selector: 'node.hl-primary',
     style: {
       'border-color': PALETTE.highlight,
-      'border-width': 'data(borderStrongView)',
+      'border-width': 5,
       'border-style': 'solid',
       'z-index': Z.primary
     }
@@ -202,7 +282,7 @@ export const graphStyle: any[] = [
       'line-color': PALETTE.highlight,
       'target-arrow-color': PALETTE.highlight,
       'source-arrow-color': PALETTE.highlight,
-      width: 'data(lineWidthHlView)',
+      width: (e: EdgeSingular) => lineW(e) + 2,
       'z-index': Z.primary
     }
   },
@@ -210,20 +290,52 @@ export const graphStyle: any[] = [
     selector: 'node.connect-source',
     style: {
       'border-color': PALETTE.multiSelect,
-      'border-width': 'data(borderStrongView)',
+      'border-width': 5,
       'border-style': 'double'
     }
   },
 
-  { selector: '.faded', style: { opacity: 0.18, 'text-opacity': 0.12 } },
-  { selector: 'node.group.faded', style: { opacity: 0.35 } },
+  /* Highlighting is additive everywhere except a planned trip, which is
+     explicitly a view of the route — and even there the rest of the map stays
+     legible: a soft dim, not the old opaque fade that hid names entirely. */
+  { selector: '.route-dim', style: { opacity: 0.45, 'text-opacity': 0.4, 'text-background-opacity': 0.35 } },
+  { selector: 'node.group.route-dim', style: { opacity: 0.5 } },
+
+  /* "arrows into space" mode: the anchor is an invisible, still-draggable grab
+     point — the arrowhead (inherited from the connection's own direction) or,
+     for an undirected link, the line's bare end, is the actual terminus. This
+     comes after every selection/highlight rule above so no state can paint a
+     border or background onto what is meant to read as nothing. */
+  {
+    selector: 'node.portal-point',
+    style: {
+      shape: 'ellipse',
+      width: 'data(w)',
+      height: 'data(h)',
+      label: '',
+      'background-opacity': 0,
+      'border-width': 0,
+      'overlay-opacity': 0,
+      'text-events': 'no'
+    }
+  },
+  {
+    selector: 'node.portal-point.hl-primary, node.portal-point:active',
+    style: {
+      'background-color': 'data(lineColor)',
+      'background-opacity': 0.95,
+      'border-width': 2,
+      'border-color': '#ffffff',
+      'border-opacity': 1
+    }
+  },
 
   /* ------------------------------- transient helpers (ghosts, handles) */
   {
     selector: 'node.ghost',
     style: {
-      width: 'data(wView)',
-      height: 'data(hView)',
+      width: 'data(w)',
+      height: 'data(h)',
       'background-color': PALETTE.highlight,
       /* the rubber band's far end must stay visible over the rooms it crosses */
       'z-index': Z.ghost,
@@ -234,7 +346,7 @@ export const graphStyle: any[] = [
   {
     selector: 'edge.ghost-edge',
     style: {
-      width: 'data(lineWidthView)',
+      width: 'data(lineWidth)',
       'line-color': PALETTE.highlight,
       'line-style': 'dashed',
       'target-arrow-color': PALETTE.highlight,
@@ -248,11 +360,11 @@ export const graphStyle: any[] = [
     selector: 'node.handle',
     style: {
       shape: 'ellipse',
-      width: 'data(wView)',
-      height: 'data(hView)',
+      width: 'data(w)',
+      height: 'data(h)',
       label: '',
       'background-color': PALETTE.highlight,
-      'border-width': 'data(borderView)',
+      'border-width': 2,
       'border-color': '#ffffff',
       'overlay-opacity': 0,
       'z-index': Z.handle,
@@ -265,7 +377,7 @@ export const graphStyle: any[] = [
   {
     selector: 'edge.reconnect-edge',
     style: {
-      width: 'data(lineWidthView)',
+      width: 'data(lineWidth)',
       'line-color': PALETTE.highlight,
       'line-style': 'dashed',
       'curve-style': 'straight',
@@ -279,7 +391,7 @@ export const graphStyle: any[] = [
     selector: 'node.drop-target',
     style: {
       'border-color': PALETTE.highlight,
-      'border-width': 'data(borderStrongView)',
+      'border-width': 5,
       'z-index': Z.dropTarget
     }
   }

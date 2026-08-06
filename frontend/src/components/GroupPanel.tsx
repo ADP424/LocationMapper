@@ -2,12 +2,16 @@ import { useMemo } from 'react';
 import { focusGroup } from '../graph/cyHolder';
 import { buildGroupTree, flattenGroupTree } from '../graph/groups';
 import { useGraphStore } from '../state/store';
+import { cssColor, readableOn } from '../utils/colors';
 
 export default function GroupPanel() {
   const groups = useGraphStore((s) => s.groups);
   const locations = useGraphStore((s) => s.locations);
   const groupLayers = useGraphStore((s) => s.groupLayers);
   const selectGroup = useGraphStore((s) => s.selectGroup);
+  /* the panel's real background, not a hard-coded hex — a future light theme
+     needs no code change here, only the CSS variable's value */
+  const panelBg = useMemo(() => cssColor('--bg-2', '#111722'), []);
 
   const rows = useMemo(() => {
     const counts = new Map<string, number>();
@@ -26,10 +30,13 @@ export default function GroupPanel() {
       <ul className="hit-list">
         {rows.map(({ group, depth, count }) => {
           const layer = groupLayers[group.id];
+          const tint = group.textColor || group.color;
+          /* the user's colour, nudged in lightness only, until it reads here */
+          const color = tint ? readableOn(tint, panelBg) : undefined;
           return (
             <li key={group.id} style={{ paddingLeft: 10 + depth * 14 }}>
               <button className="link" onClick={() => focusGroup(group.id, selectGroup)}>
-                <span className="hit-title" style={{ color: group.textColor || undefined }}>
+                <span className="hit-title" style={{ color }}>
                   <span className="group-dot" style={{ background: group.color || '#8fa7c4' }} />
                   {group.name || 'Unnamed Grouping'}
                 </span>

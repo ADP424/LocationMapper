@@ -48,10 +48,10 @@ export interface LayoutMetrics {
   nodeCount: number;
   avgEdgeLabelWidth: number;
   p90EdgeLabelWidth: number;
-  /** Node extents in *base* units, so per-location size scalars are included. */
+  /** Node **footprints** — `max(box, name plate)` per axis — in model units. */
   avgNodeSpan: number;
   p90NodeSpan: number;
-  /** The global base size the geometry above was measured at. */
+  /** The Name Size the plates above were measured at. */
   baseScale: number;
 }
 
@@ -79,21 +79,28 @@ export function computeMetrics(
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
- * Roughly a default-size room with a short name, *at base size 1*. Spacing only
- * grows past this, so a map that never touches the per-location size scalar lays
- * out exactly as it always did — and raising the global base size gives chunkier
- * boxes against the same whitespace rather than a no-op uniform zoom.
+ * Roughly a default-size room with a short name, at Name Size 1. Spacing only
+ * grows past this, so a map at Base Size 1 lays out exactly as before. At
+ * Base Size 4 a name is the footprint, not the box, so the nominal has to
+ * grow with it too or every map reads as "all rooms are oversized".
  */
-const NOMINAL_NODE_SPAN = 120;
+const NOMINAL_BOX_SPAN = 120;
+const NOMINAL_NAME_SPAN = 120;
+const nominalSpan = (baseScale: number) => Math.max(NOMINAL_BOX_SPAN, NOMINAL_NAME_SPAN * baseScale);
 
-/** Widest side of a node, in the same base units the layout is solved in. */
+/**
+ * Widest side of a node's *footprint* — box or name plate, whichever is
+ * bigger — in the same base units the layout is solved in. A 1x room whose
+ * name is drawn four times larger than its box needs four times the elbow
+ * room, or long names land on their neighbours. (Headless quotient nodes
+ * carry their footprint directly in `w`/`h`, so the `spanW`/`spanH` fallback
+ * covers both cases.)
+ */
 const nodeSpan = (n: any) => {
-  const w = Number(n.data('w'));
-  const h = Number(n.data('h'));
-  return Math.max(
-    Number.isFinite(w) && w > 0 ? w : n.width(),
-    Number.isFinite(h) && h > 0 ? h : n.height()
-  );
+  const num = (v: unknown, fb: number) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : fb);
+  const w = Math.max(num(n.data('w'), n.width()), num(n.data('spanW'), 0));
+  const h = Math.max(num(n.data('h'), n.height()), num(n.data('spanH'), 0));
+  return Math.max(w, h);
 };
 
 /**
@@ -112,7 +119,7 @@ const nodeSpan = (n: any) => {
 export function layoutOptions(name: LayoutName, metrics: LayoutMetrics): LayoutOptions {
   const { nodeCount, avgEdgeLabelWidth: avg, p90EdgeLabelWidth: p90, p90NodeSpan } = metrics;
   const animate = nodeCount <= 400;
-  const nominal = NOMINAL_NODE_SPAN * metrics.baseScale;
+  const nominal = nominalSpan(metrics.baseScale);
   /** Extra space the over-sized rooms deserve; 0 on a default map. */
   const big = Math.max(0, p90NodeSpan - nominal);
 

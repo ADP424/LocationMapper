@@ -44,7 +44,6 @@ export const mapLocation = (r: any): Location => ({
   name: r.name,
   kind: r.kind,
   size: Number(r.size ?? 1),
-  layer: r.layer,
   notes: r.notes,
   color: r.color,
   textColor: r.text_color,
@@ -95,7 +94,6 @@ export const mapLocationLabel = (r: any): LocationLabel => ({
   defaultSize: num(r.default_size),
   defaultColor: r.default_color,
   defaultTextColor: r.default_text_color,
-  defaultLayer: r.default_layer,
   defaultGroupId: r.default_group_id ?? null,
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)

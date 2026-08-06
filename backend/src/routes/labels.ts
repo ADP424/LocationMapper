@@ -176,7 +176,6 @@ const locationLabelColumns = (b: ReturnType<typeof locationLabelCreate.parse>) =
   default_size: b.defaultSize,
   default_color: b.defaultColor,
   default_text_color: b.defaultTextColor,
-  default_layer: b.defaultLayer,
   default_group_id: b.defaultGroupId
 });
 

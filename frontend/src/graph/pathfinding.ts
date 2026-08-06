@@ -139,7 +139,17 @@ const HOP_EPSILON = 0.001;
 const PROGRESS_EVERY_MS = 200;
 
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-const yieldTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+/* `setTimeout(0)` is clamped to 4 ms once nested (which the planner does on
+   every chunk boundary) — a 2M-state search could sleep ~300ms doing nothing.
+   A MessageChannel round-trip yields to the event loop without that clamp. */
+const yieldChannel = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null;
+const yieldTick = (): Promise<void> =>
+  yieldChannel
+    ? new Promise((resolve) => {
+        yieldChannel.port1.onmessage = () => resolve();
+        yieldChannel.port2.postMessage(0);
+      })
+    : new Promise((resolve) => setTimeout(resolve, 0));
 
 const axisDelta = (a: number | null, b: number | null) =>
   a === null || a === undefined || b === null || b === undefined

@@ -30,6 +30,38 @@ export function insertSql(table: string, columns: Columns, returning = '*'): Sql
   };
 }
 
+/**
+ * Multi-row INSERT for bulk loads (import). Postgres caps bind parameters at
+ * 65,535 per statement, so rows are chunked to stay well under that.
+ */
+export async function insertRows(
+  client: { query: (text: string, values: unknown[]) => Promise<unknown> },
+  table: string,
+  columns: string[],
+  rows: unknown[][],
+  suffix = ''
+): Promise<void> {
+  if (!rows.length) return;
+  const chunkSize = Math.max(1, Math.floor(60_000 / columns.length));
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const values: unknown[] = [];
+    const tuples = chunk.map(
+      (row) =>
+        `(${row
+          .map((v) => {
+            values.push(v);
+            return `$${values.length}`;
+          })
+          .join(',')})`
+    );
+    await client.query(
+      `INSERT INTO ${table} (${columns.join(',')}) VALUES ${tuples.join(',')} ${suffix}`,
+      values
+    );
+  }
+}
+
 /** `null` when there is nothing to update. */
 export function updateSql(
   table: string,

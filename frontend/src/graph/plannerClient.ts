@@ -11,33 +11,54 @@ export interface PlannerRun {
 
 let nextRequestId = 1;
 
+/** Kept warm across runs — spinning one up costs ~5-20ms, paid on every trip re-plan. */
+let pooledWorker: Worker | null = null;
+let pooledBusy = false;
+
+function getWorker(): Worker | null {
+  if (pooledWorker && !pooledBusy) return pooledWorker;
+  if (pooledWorker) return null; // busy with another request; caller falls back
+  try {
+    pooledWorker = new Worker(new URL('../workers/planner.worker.ts', import.meta.url), {
+      type: 'module'
+    });
+    return pooledWorker;
+  } catch {
+    pooledWorker = null;
+    return null;
+  }
+}
+
+function discardPool() {
+  pooledWorker?.terminate();
+  pooledWorker = null;
+  pooledBusy = false;
+}
+
 /**
  * Runs the planner in a Worker so long searches never block the UI, and so the
  * user can cancel and still get whatever was found. Falls back to the main
- * thread (the planner yields, so the UI survives) if Workers are unavailable.
+ * thread (the planner yields, so the UI survives) if Workers are unavailable
+ * or already busy with a superseded request.
  */
 export function runPlanner(
   input: PlannerInput,
   onProgress?: (states: number, elapsedMs: number) => void
 ): PlannerRun {
   const requestId = nextRequestId++;
-
-  let worker: Worker | null = null;
-  try {
-    worker = new Worker(new URL('../workers/planner.worker.ts', import.meta.url), {
-      type: 'module'
-    });
-  } catch {
-    worker = null;
-  }
+  const worker = pooledBusy ? null : getWorker();
 
   if (worker) {
-    const active = worker;
+    pooledBusy = true;
     let settled = false;
     let finish: (plan: RoutePlan | null) => void = () => undefined;
+    const release = () => {
+      settled = true;
+      pooledBusy = false;
+    };
     const promise = new Promise<RoutePlan | null>((resolve, reject) => {
       finish = resolve;
-      active.onmessage = (ev: MessageEvent<any>) => {
+      worker.onmessage = (ev: MessageEvent<any>) => {
         const msg = ev.data;
         if (msg?.requestId !== requestId) return;
         if (msg.type === 'progress') {
@@ -45,37 +66,38 @@ export function runPlanner(
           return;
         }
         if (msg.type === 'error') {
-          settled = true;
-          active.terminate();
+          release();
           reject(new Error(msg.message || 'route planning failed'));
           return;
         }
         if (msg.type === 'done') {
-          settled = true;
-          active.terminate();
+          release();
           resolve(msg.plan as RoutePlan);
         }
       };
-      active.onerror = (ev) => {
+      worker.onerror = (ev) => {
         if (settled) return;
-        settled = true;
         ev.preventDefault?.();
-        active.terminate();
+        /* the worker's state is unknown after an uncaught error — don't reuse it */
+        discardPool();
         reject(new Error(ev.message || 'the route planner worker crashed'));
       };
-      active.postMessage({ type: 'plan', requestId, input });
+      worker.postMessage({ type: 'plan', requestId, input });
     });
 
     return {
       promise,
       cancel: () => {
-        if (!settled) active.postMessage({ type: 'cancel', requestId });
+        if (!settled) worker.postMessage({ type: 'cancel', requestId });
       },
       discard: () => {
         if (settled) return;
+        /* graceful: let the worker finish its current chunk and free itself up,
+           rather than terminating and paying to spin up a fresh one next time */
         settled = true;
-        active.terminate();
-        /* never leave the promise dangling for a caller that still holds it */
+        pooledBusy = false;
+        worker.postMessage({ type: 'cancel', requestId });
+        worker.onmessage = null;
         finish(null);
       }
     };

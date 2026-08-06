@@ -19,7 +19,6 @@ export async function applyLocationLabel(client: PoolClient, locationId: string,
     size: nullable(l.default_size),
     color: text(l.default_color),
     text_color: text(l.default_text_color),
-    layer: text(l.default_layer),
     group_id: nullable(l.default_group_id)
   });
   if (stmt) await client.query(stmt.text, stmt.values);

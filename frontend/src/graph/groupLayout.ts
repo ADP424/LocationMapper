@@ -1,9 +1,10 @@
 import cytoscape, { Core, ElementDefinition } from 'cytoscape';
 import { LayoutName, computeMetrics, layoutOptions } from './layouts';
-import { baseSize } from './viewScale';
+import { layoutSpan } from './viewScale';
 
+/* the drawn grouping padding is fixed model geometry — it never scales */
 const GROUP_PADDING = 34;
-/** Extra headroom inside a grouping for its title. */
+/** Extra headroom inside a grouping for its title; this *does* scale with Base Size. */
 const LABEL_ROOM = 20;
 
 type Pos = { x: number; y: number };
@@ -124,9 +125,7 @@ export async function computeGroupedLayout(
   name: LayoutName,
   baseScale = 1
 ): Promise<Map<string, Pos>> {
-  /* the drawn grouping padding scales with the base size, so the quotient node
-     a parent lays out must grow with it too */
-  const padding = GROUP_PADDING * baseScale;
+  const padding = GROUP_PADDING;
   const labelRoom = LABEL_ROOM * baseScale;
 
   const realNodes = cy
@@ -137,11 +136,12 @@ export async function computeGroupedLayout(
   const groupNodes = cy.nodes('.group');
   const edges = cy.edges().filter((e) => !e.hasClass('ghost-edge') && !e.hasClass('reconnect-edge'));
 
-  /* baseSize() carries each location's size scalar, so a 3x room really is
-     solved as a 3x box at every level of nesting */
+  /* layoutSpan() carries each location's size scalar *and* its name plate
+     (whichever is bigger), so a 3x room — or a 1x room with a huge name —
+     really is solved at that footprint at every level of nesting */
   const size = new Map<string, Size>();
   realNodes.forEach((n) => {
-    const b = baseSize(n);
+    const b = layoutSpan(n);
     size.set(n.id(), { w: Math.max(b.w, 30), h: Math.max(b.h, 24) });
   });
 

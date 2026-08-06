@@ -82,7 +82,8 @@ export default function App() {
 
         <main className="main">
           {mapId ? (
-            <GraphCanvas />
+            /* a new map gets a renderer tuned to its size — see canvas/useCytoscape */
+            <GraphCanvas key={mapId} />
           ) : (
             <div className="empty-state">
               <h1>MapGraph</h1>

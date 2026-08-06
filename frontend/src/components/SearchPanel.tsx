@@ -55,7 +55,7 @@ export default function SearchPanel() {
     if (searchLocations && (!filter || filter.kind === 'loc')) {
       for (const l of Object.values(locations)) {
         if (filter && !l.labelIds.includes(filter.id)) continue;
-        let s = score(l.name, 1) + score(l.layer, 0.4);
+        let s = score(l.name, 1);
         for (const id of l.labelIds) s += score(locationLabels[id]?.name ?? '', 0.5);
         if (includeNotes) s += score(l.notes, 0.2);
         if (s > 0) {
@@ -63,7 +63,7 @@ export default function SearchPanel() {
             kind: 'location',
             id: l.id,
             title: l.name || 'Unnamed Location',
-            sub: [formatCoordinates(l), l.layer, l.visited ? 'Visited' : 'Not Visited']
+            sub: [formatCoordinates(l), l.visited ? 'Visited' : 'Not Visited']
               .filter(Boolean)
               .join(' · '),
             score: s

@@ -6,6 +6,7 @@ import { buildGroupTree, flattenGroupTree, renderableGroupIds } from './groups';
 import {
   EDGE_LABEL_FONT,
   GROUP_LABEL_FONT,
+  GROUP_LINE_HEIGHT,
   NODE_LABEL_FONT,
   NODE_LINE_HEIGHT,
   PORTAL_LABEL_FONT,
@@ -17,18 +18,22 @@ import {
 import {
   GROUP_OPACITY,
   PALETTE,
+  PLATE_PAD,
   effectiveLineStyle,
   normaliseShape,
   shapeMetrics,
   weightToWidth
 } from './model';
+import type { EphemeralStyle } from '../state/settings';
 
 export type LabelMode = 'names' | 'all' | 'none';
 
 export interface BuildOptions {
   labelMode: LabelMode;
-  /** Global multiplier on every drawn size (`settings.baseScale`). */
+  /** Global multiplier on every drawn *name* (`settings.baseScale`). Boxes never scale with it. */
   baseScale: number;
+  /** Detached stub boxes, or bare arrows into space. */
+  ephemeralStyle: EphemeralStyle;
   positionOverrides?: Record<string, { x: number; y: number }>;
   /** Pending (unsaved) stub offsets, keyed by portal node id. */
   portalOffsetOverrides?: Record<string, { dx: number; dy: number }>;
@@ -54,6 +59,38 @@ export function parsePortalId(id: string): { connectionId: string; side: 'out' |
 
 const MAX_LABEL_WIDTH = 170;
 
+/* ----------------------------------------------------------- memoisation */
+interface MemoEntry {
+  sig: string;
+  els: ElementDefinition[];
+}
+const groupMemo = new WeakMap<Group, MemoEntry>();
+const locationMemo = new WeakMap<Location, MemoEntry>();
+const connectionMemo = new WeakMap<Connection, MemoEntry>();
+
+/**
+ * Store rows are immutable — every edit replaces the row object — so a row's
+ * identity plus a signature of the *external* inputs (label mode, base scale,
+ * parent visibility, label names, lock state, endpoint names) fully keys its
+ * element definitions. The per-store-change rebuild drops from
+ * O(elements × text measurement) to O(elements) WeakMap lookups, with real
+ * work only for rows that changed. Definitions are shared across builds:
+ * callers must not mutate them, and `syncGraph`/`reconcile` must clone before
+ * handing one to `cy.add`, since Cytoscape takes ownership of the data object.
+ */
+function memo<T extends object>(
+  cache: WeakMap<T, MemoEntry>,
+  row: T,
+  sig: string,
+  build: () => ElementDefinition[]
+): ElementDefinition[] {
+  const hit = cache.get(row);
+  if (hit && hit.sig === sig) return hit.els;
+  const entry = { sig, els: build() };
+  cache.set(row, entry);
+  return entry.els;
+}
+
 /** A location's box scalar; anything invalid falls back to "normal". */
 const sizeOf = (l: Location) => (Number.isFinite(l.size) && l.size > 0 ? l.size : 1);
 const prettyNumber = (n: number) => String(Math.round(n * 100) / 100);
@@ -68,10 +105,10 @@ export function describeLock(conn: Connection, locations: Record<string, Locatio
 const safeName = (l: Location | undefined) => (l?.name && l.name.trim()) || 'Unnamed';
 
 /**
- * Size a node so the label fits *inside* the shape, not just its bounding box.
- * `scale` is the location's size scalar: it multiplies the drawn box here, and
- * the text-side properties are multiplied by the same amount when their
- * zoom-compensated twins are computed (see `viewScale`).
+ * Size a node so the label fits *inside* the shape at the base font, not just
+ * its bounding box. `scale` is the location's own size scalar — it multiplies
+ * the box here, once, at build time. Name Size is deliberately absent: boxes
+ * never change size at runtime for any reason, including this setting.
  */
 function boxFor(label: string, shape: string, font: string, lineHeight: number, scale = 1) {
   const lines = label ? label.split('\n') : [];
@@ -84,6 +121,22 @@ function boxFor(label: string, shape: string, font: string, lineHeight: number, 
     /* keep Cytoscape from re-wrapping differently than we measured */
     textMaxWidth: Math.max(24, Math.ceil(textW) + 6),
     textMarginY: m.textMarginY ?? 0
+  };
+}
+
+/**
+ * The name's own drawn footprint — the opaque plate — at compensation 1.
+ * Carries `size × Name Size`, because every layout, the content extent and
+ * the draw order have to know whichever of the box or the name is bigger.
+ */
+function plateFor(label: string, font: string, lineHeight: number, size: number, nameScale: number) {
+  if (!label) return { lw: 0, lh: 0 };
+  const textW = measureLabelWidth(label, font);
+  const lines = Math.max(1, label.split('\n').length);
+  const k = size * nameScale;
+  return {
+    lw: (textW + PLATE_PAD * 2) * k,
+    lh: (lines * lineHeight + PLATE_PAD * 2) * k
   };
 }
 
@@ -127,242 +180,357 @@ export function buildElements(
     return undefined;
   };
 
+  /* identity view twins: `buildElements` bakes in the un-scaled geometry, and
+     the ViewScaler's serial 0 (the identity ViewScale) is what a brand-new
+     element is deemed to already carry — so with sizing off nothing is ever
+     written to a freshly-added element at all */
+  const common = `${opts.labelMode}|${scale}|${opts.ephemeralStyle}`;
+
   /* -------------------------------------------------------- groupings */
   for (const g of orderedGroups) {
-    nodes.push({
-      data: {
-        id: groupNodeId(g.id),
-        groupId: g.id,
-        kind: 'group',
-        label: showLabels ? g.name || 'Unnamed Grouping' : '',
-        fill: g.color || PALETTE.groupFill,
-        border: g.color || PALETTE.groupBorder,
-        /* the title falls back to the body colour until it is given its own */
-        textColor: g.textColor || g.color || PALETTE.groupBorder,
-        memberCount: memberCount.get(g.id) ?? 0,
-        /* un-wrapped, so it feeds the label ceiling (see viewScale) */
-        labelWidth: showLabels
-          ? measureTextWidth(g.name || 'Unnamed Grouping', GROUP_LABEL_FONT) * scale
-          : 0,
-        /* neutral defaults; the layering pass refines them after every
-           arrangement (see graph/layering) */
-        zLayer: 1,
-        groupFillOpacity: GROUP_OPACITY.fill,
-        groupBorderOpacity: GROUP_OPACITY.border,
-        /* sub-groupings are simply compound children of their parent */
-        parent: g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined
-      },
-      classes: 'group',
-      /* grouping selection lives in the store and is drawn with `hl-primary`;
-         Cytoscape's native selection would only add an overlay flicker */
-      selectable: false,
-      grabbable: true
-    });
+    const parent = g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined;
+    const count = memberCount.get(g.id) ?? 0;
+    const rawGroupW = showLabels ? measureTextWidth(g.name || 'Unnamed Grouping', GROUP_LABEL_FONT) : 0;
+    const els = memo(groupMemo, g, `${common}|${parent ?? ''}|${count}`, () => [
+      {
+        data: {
+          id: groupNodeId(g.id),
+          groupId: g.id,
+          kind: 'group',
+          label: showLabels ? g.name || 'Unnamed Grouping' : '',
+          fill: g.color || PALETTE.groupFill,
+          border: g.color || PALETTE.groupBorder,
+          /* the title falls back to the body colour until it is given its own */
+          textColor: g.textColor || g.color || PALETTE.groupBorder,
+          memberCount: count,
+          /* un-wrapped, so it feeds the label ceiling (see viewScale) */
+          labelWidth: rawGroupW * scale,
+          /* the skeleton view's title fit reads this through `namePlate()`,
+             same as locations and portals — one accessor, one contract */
+          lw: rawGroupW * scale,
+          lh: rawGroupW ? GROUP_LINE_HEIGHT * scale : 0,
+          /* neutral defaults; the layering pass refines them after every
+             arrangement (see graph/layering) */
+          zLayer: 1,
+          groupFillOpacity: GROUP_OPACITY.fill,
+          groupBorderOpacity: GROUP_OPACITY.border,
+          /* sub-groupings are simply compound children of their parent */
+          parent,
+          tView: scale,
+          minFontView: 0,
+          skel: 0,
+          boxW: 0,
+          boxH: 0
+        },
+        classes: 'group',
+        /* grouping selection lives in the store and is drawn with `hl-primary`;
+           Cytoscape's native selection would only add an overlay flicker */
+        selectable: false,
+        grabbable: true
+      }
+    ]);
+    nodes.push(els[0]);
   }
 
   /* -------------------------------------------------------- locations */
   for (const l of locations) {
-    const hasNotes = l.notes.trim().length > 0;
-    const shape = normaliseShape(l.kind);
-    const size = sizeOf(l);
-    const lines = showLabels ? wrapLabel(l.name || 'Unnamed Location', MAX_LABEL_WIDTH) : [];
+    const parent = parentOf(l);
+    const labelSig =
+      opts.labelMode === 'all'
+        ? (l.labelIds ?? []).map((id) => opts.locationLabelNames?.[id] ?? '').join(',')
+        : '';
+    const els = memo(locationMemo, l, `${common}|${parent ?? ''}|${labelSig}`, () => {
+      const hasNotes = l.notes.trim().length > 0;
+      const shape = normaliseShape(l.kind);
+      const size = sizeOf(l);
+      const lines = showLabels ? wrapLabel(l.name || 'Unnamed Location', MAX_LABEL_WIDTH) : [];
 
-    if (showLabels && opts.labelMode === 'all') {
-      const labelNames = (l.labelIds ?? [])
-        .map((id) => opts.locationLabelNames?.[id])
-        .filter(Boolean)
-        .join(', ');
-      const badges = [
-        formatCoordinates(l),
-        l.layer ? `«${l.layer}»` : '',
-        size !== 1 ? `×${prettyNumber(size)}` : '',
-        labelNames ? `#${labelNames}` : '',
-        hasNotes ? '📝' : ''
-      ]
-        .filter(Boolean)
-        .join(' ');
-      if (badges) lines.push(badges);
-    }
+      if (showLabels && opts.labelMode === 'all') {
+        const labelNames = (l.labelIds ?? [])
+          .map((id) => opts.locationLabelNames?.[id])
+          .filter(Boolean)
+          .join(', ');
+        const badges = [
+          formatCoordinates(l),
+          size !== 1 ? `×${prettyNumber(size)}` : '',
+          labelNames ? `#${labelNames}` : '',
+          hasNotes ? '📝' : ''
+        ]
+          .filter(Boolean)
+          .join(' ');
+        if (badges) lines.push(badges);
+      }
 
-    const label = lines.join('\n');
-    const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size * scale);
+      const label = lines.join('\n');
+      /* the box fits the name at the base font, times the location's own size
+         scalar — Name Size never touches it */
+      const box = boxFor(label, shape, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size);
+      const plate = plateFor(label, NODE_LABEL_FONT, NODE_LINE_HEIGHT, size, scale);
 
-    nodes.push({
-      data: {
-        id: l.id,
-        kind: 'location',
-        label,
-        name: l.name,
-        layer: l.layer,
-        shape,
-        size,
-        ...box,
-        fill: l.color || (l.visited ? PALETTE.nodeFillVisited : PALETTE.nodeFill),
-        border: l.visited ? PALETTE.nodeBorderVisited : PALETTE.nodeBorder,
-        textColor: l.textColor || PALETTE.nodeText,
-        visited: l.visited,
-        hasNotes,
-        /* refined by the layering pass right after every arrangement */
-        zLayer: 0,
-        parent: parentOf(l)
-      },
-      position: positionOf(l),
-      classes: ['location', l.visited ? 'visited' : 'unvisited', hasNotes ? 'has-notes' : '']
-        .filter(Boolean)
-        .join(' ')
+      return [
+        {
+          data: {
+            id: l.id,
+            kind: 'location',
+            label,
+            name: l.name,
+            shape,
+            size,
+            ...box,
+            ...plate,
+            /* what a layout must reserve: the box or the name plate, whichever is bigger */
+            spanW: Math.max(box.w, plate.lw),
+            spanH: Math.max(box.h, plate.lh),
+            fill: l.color || (l.visited ? PALETTE.nodeFillVisited : PALETTE.nodeFill),
+            border: l.visited ? PALETTE.nodeBorderVisited : PALETTE.nodeBorder,
+            textColor: l.textColor || PALETTE.nodeText,
+            visited: l.visited,
+            hasNotes,
+            /* refined by the layering pass right after every arrangement */
+            zLayer: 0,
+            parent,
+            tView: size * scale,
+            minFontView: 0,
+            skel: 0
+          },
+          position: positionOf(l),
+          classes: ['location', l.visited ? 'visited' : 'unvisited', hasNotes ? 'has-notes' : '']
+            .filter(Boolean)
+            .join(' ')
+        }
+      ];
     });
+    /* a pending (unsaved) drag is the only position the cache can't see */
+    const o = overrides[l.id];
+    nodes.push(o ? { ...els[0], position: { x: o.x, y: o.y } } : els[0]);
   }
 
   /* ------------------------------------------------------ connections */
   for (const c of connections) {
     const locked = isEffectivelyLocked(c, visited);
-    const hasNotes = c.notes.trim().length > 0;
-    const lineWidth = weightToWidth(c.weight) * scale;
-    /* colour is never forced by locked/ephemeral state — only by the user */
-    const lineColor = c.color || PALETTE.edge;
+    const labelSig =
+      opts.labelMode === 'all'
+        ? (c.labelIds ?? []).map((id) => opts.connectionLabelNames?.[id] ?? '').join(',')
+        : '';
 
-    const shared = {
-      connectionId: c.id,
-      kind: 'connection',
-      name: c.name,
-      locked,
-      gated: c.locked,
-      ephemeral: c.ephemeral,
-      hasNotes,
-      lineColor,
-      lineStyle: effectiveLineStyle(c, locked),
-      lineWidth,
-      textColor: c.textColor || PALETTE.edgeText,
-      sourceArrow: c.arrowSource ? 'triangle' : 'none',
-      targetArrow: c.arrowTarget ? 'triangle' : 'none'
+    const buildShared = () => {
+      const hasNotes = c.notes.trim().length > 0;
+      /* Name Size is a text multiplier now: line thickness comes from weight alone */
+      const lineWidth = weightToWidth(c.weight);
+      /* colour is never forced by locked/ephemeral state — only by the user */
+      const lineColor = c.color || PALETTE.edge;
+      return {
+        connectionId: c.id,
+        kind: 'connection',
+        name: c.name,
+        locked,
+        gated: c.locked,
+        ephemeral: c.ephemeral,
+        hasNotes,
+        lineColor,
+        lineStyle: effectiveLineStyle(c, locked),
+        lineWidth,
+        textColor: c.textColor || PALETTE.edgeText,
+        sourceArrow: c.arrowSource ? 'triangle' : 'none',
+        targetArrow: c.arrowTarget ? 'triangle' : 'none'
+      };
     };
 
-    const connLabelNames =
-      opts.labelMode === 'all'
-        ? (c.labelIds ?? [])
-            .map((id) => opts.connectionLabelNames?.[id])
-            .filter(Boolean)
-            .map((n) => `#${n}`)
-            .join(' ')
-        : '';
-
-    const decorate = (text: string) =>
-      showLabels
-        ? [locked ? '🔒' : '', opts.labelMode === 'all' && hasNotes ? '📝' : '', text, connLabelNames]
-            .filter(Boolean)
-            .join(' ')
-        : '';
-
     if (!c.ephemeral) {
-      const label = decorate(c.name);
-      edges.push({
-        data: {
-          ...shared,
-          id: c.id,
-          source: c.sourceId,
-          target: c.targetId,
-          label,
-          labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT) * scale
-        },
-        classes: ['connection', hasNotes ? 'has-notes' : ''].filter(Boolean).join(' ')
+      const els = memo(connectionMemo, c, `${common}|${locked ? 1 : 0}|${labelSig}`, () => {
+        const shared = buildShared();
+        const connLabelNames =
+          opts.labelMode === 'all'
+            ? (c.labelIds ?? [])
+                .map((id) => opts.connectionLabelNames?.[id])
+                .filter(Boolean)
+                .map((n) => `#${n}`)
+                .join(' ')
+            : '';
+        const label = showLabels
+          ? [locked ? '🔒' : '', opts.labelMode === 'all' && shared.hasNotes ? '📝' : '', c.name, connLabelNames]
+              .filter(Boolean)
+              .join(' ')
+          : '';
+        return [
+          {
+            data: {
+              ...shared,
+              id: c.id,
+              source: c.sourceId,
+              target: c.targetId,
+              label,
+              labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT) * scale,
+              tView: scale,
+              minFontView: 0,
+              lineView: 1
+            },
+            classes: ['connection', shared.hasNotes ? 'has-notes' : ''].filter(Boolean).join(' ')
+          }
+        ];
       });
+      edges.push(els[0]);
       continue;
     }
 
-    /* ephemeral: two detached stubs instead of one long line */
+    /* ephemeral: two detached stubs — geometry follows the anchor rooms */
     const src = byId.get(c.sourceId);
     const tgt = byId.get(c.targetId);
-    const glyph = c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
-    const suffix = c.name ? ` (${c.name})` : '';
-    const srcPos = positionOf(src);
-    const tgtPos = positionOf(tgt);
+    const srcParent = parentOf(src);
+    const tgtParent = parentOf(tgt);
+    const sig = `${common}|${locked ? 1 : 0}|${labelSig}|${safeName(src)}|${safeName(tgt)}|${srcParent ?? ''}|${tgtParent ?? ''}`;
 
-    /** Stubs live at `anchor + offset`, so they travel with their room. */
-    const stub = (
-      storedDx: number | null,
-      storedDy: number | null,
-      defaultDx: number,
-      defaultDy: number,
-      id: string,
-      anchor: { x: number; y: number } | undefined
-    ) => {
-      const override = offsetOverrides[id];
-      const dx = override ? override.dx : storedDx ?? defaultDx;
-      const dy = override ? override.dy : storedDy ?? defaultDy;
+    /* cached as [outStub, inStub, outEdge, inEdge]; stub *positions* and their
+       offset overrides are attached fresh each build since anchors move */
+    const els = memo(connectionMemo, c, sig, () => {
+      const shared = buildShared();
+      const glyph = c.arrowSource && c.arrowTarget ? '⇄' : c.arrowSource ? '←' : c.arrowTarget ? '→' : '—';
+      const arrows = opts.ephemeralStyle === 'arrows';
+
+      /* where this half goes / comes from — the box's reason to exist in
+         'nodes' mode, and (with the connection's own name folded in) what
+         rides the line in 'arrows' mode, since there is no box to caption it */
+      const outText = `${glyph} To ${safeName(tgt)}`;
+      const inText = `From ${safeName(src)} ${glyph}`;
+
+      const connLabelNames =
+        opts.labelMode === 'all'
+          ? (c.labelIds ?? [])
+              .map((id) => opts.connectionLabelNames?.[id])
+              .filter(Boolean)
+              .map((n) => `#${n}`)
+              .join(' ')
+          : '';
+
+      const boxLabel = (text: string) => (showLabels && !arrows ? `${locked ? '🔒 ' : ''}${text}` : '');
+      /* the name always rides the line, italic (see edge.stub in style.ts) —
+         never the stub box; 'arrows' mode has no box, so the line falls back
+         to the full description */
+      const lineLabel = (text: string) => {
+        if (!showLabels) return '';
+        const base = arrows ? `${locked ? '🔒 ' : ''}${text}${c.name ? ` · ${c.name}` : ''}` : c.name;
+        if (!base) return '';
+        return [opts.labelMode === 'all' && shared.hasNotes ? '📝' : '', base, connLabelNames]
+          .filter(Boolean)
+          .join(' ');
+      };
+
+      const outNodeLabel = wrapLabel(boxLabel(outText), 190, PORTAL_LABEL_FONT).join('\n');
+      const inNodeLabel = wrapLabel(boxLabel(inText), 190, PORTAL_LABEL_FONT).join('\n');
+      const outEdgeLabel = lineLabel(outText);
+      const inEdgeLabel = lineLabel(inText);
+
+      /* portals carry no per-location size scalar: their box is static, at 1×.
+         In 'arrows' mode the anchor is an invisible 10×10 grab point instead
+         of a labelled tag — small enough to read as "nothing", still draggable. */
+      const outBox = arrows
+        ? { w: 10, h: 10, textMaxWidth: 0, textMarginY: 0 }
+        : boxFor(outNodeLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1);
+      const inBox = arrows
+        ? { w: 10, h: 10, textMaxWidth: 0, textMarginY: 0 }
+        : boxFor(inNodeLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1);
+      const outPlate = arrows ? { lw: 0, lh: 0 } : plateFor(outNodeLabel, PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1, scale);
+      const inPlate = arrows ? { lw: 0, lh: 0 } : plateFor(inNodeLabel, PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1, scale);
+
+      return [
+        {
+          data: {
+            ...shared,
+            id: portalNodeId(c.id, 'out'),
+            portalSide: 'out',
+            anchorId: c.sourceId,
+            zLayer: 0,
+            /* the default offset no longer needs to clear a Name-Size-scaled box */
+            offsetX: c.outDx ?? 170,
+            offsetY: c.outDy ?? 80,
+            shape: 'tag',
+            parent: srcParent,
+            label: outNodeLabel,
+            ...outBox,
+            ...outPlate,
+            spanW: Math.max(outBox.w, outPlate.lw),
+            spanH: Math.max(outBox.h, outPlate.lh),
+            tView: scale,
+            minFontView: 0,
+            skel: 0
+          },
+          classes: `portal portal-out${arrows ? ' portal-point' : ''}`
+        },
+        {
+          data: {
+            ...shared,
+            id: portalNodeId(c.id, 'in'),
+            portalSide: 'in',
+            anchorId: c.targetId,
+            zLayer: 0,
+            offsetX: c.inDx ?? -170,
+            offsetY: c.inDy ?? -80,
+            shape: 'tag',
+            parent: tgtParent,
+            label: inNodeLabel,
+            ...inBox,
+            ...inPlate,
+            spanW: Math.max(inBox.w, inPlate.lw),
+            spanH: Math.max(inBox.h, inPlate.lh),
+            tView: scale,
+            minFontView: 0,
+            skel: 0
+          },
+          classes: `portal portal-in${arrows ? ' portal-point' : ''}`
+        },
+        {
+          data: {
+            ...shared,
+            id: portalEdgeId(c.id, 'out'),
+            source: c.sourceId,
+            target: portalNodeId(c.id, 'out'),
+            label: outEdgeLabel,
+            labelWidth: outEdgeLabel ? measureLabelWidth(outEdgeLabel, EDGE_LABEL_FONT) * scale : 0,
+            tView: scale,
+            minFontView: 0,
+            lineView: 1
+          },
+          classes: 'stub stub-out'
+        },
+        {
+          data: {
+            ...shared,
+            id: portalEdgeId(c.id, 'in'),
+            source: portalNodeId(c.id, 'in'),
+            target: c.targetId,
+            label: inEdgeLabel,
+            labelWidth: inEdgeLabel ? measureLabelWidth(inEdgeLabel, EDGE_LABEL_FONT) * scale : 0,
+            tView: scale,
+            minFontView: 0,
+            lineView: 1
+          },
+          classes: 'stub stub-in'
+        }
+      ];
+    });
+
+    /** Stubs live at `anchor + offset`; a pending (unsaved) drag on the stub
+     *  itself overrides the stored offset the cached definition carries. */
+    const placeStub = (
+      def: ElementDefinition,
+      anchor: { x: number; y: number } | undefined,
+      override: { dx: number; dy: number } | undefined
+    ): ElementDefinition => {
+      const data = def.data as Record<string, unknown>;
+      const dx = override ? override.dx : (data.offsetX as number);
+      const dy = override ? override.dy : (data.offsetY as number);
       return {
-        offset: { offsetX: dx, offsetY: dy },
+        ...def,
+        data: override ? { ...data, offsetX: dx, offsetY: dy } : data,
         position: anchor ? { x: anchor.x + dx, y: anchor.y + dy } : undefined
       };
     };
 
-    /* the *default* offset must clear a bigger room; a saved one is absolute */
-    const outStub = stub(c.outDx, c.outDy, 170 * scale, 80 * scale, portalNodeId(c.id, 'out'), srcPos);
-    const inStub = stub(c.inDx, c.inDy, -170 * scale, -80 * scale, portalNodeId(c.id, 'in'), tgtPos);
-
-    const outLabel = showLabels
-      ? wrapLabel(`${locked ? '🔒 ' : ''}${glyph} To ${safeName(tgt)}${suffix}`, 190, PORTAL_LABEL_FONT).join('\n')
-      : '';
-    const inLabel = showLabels
-      ? wrapLabel(`${locked ? '🔒 ' : ''}From ${safeName(src)}${suffix} ${glyph}`, 190, PORTAL_LABEL_FONT).join('\n')
-      : '';
-
-    nodes.push({
-      data: {
-        ...shared,
-        id: portalNodeId(c.id, 'out'),
-        portalSide: 'out',
-        anchorId: c.sourceId,
-        zLayer: 0,
-        ...outStub.offset,
-        shape: 'tag',
-        parent: parentOf(src),
-        label: outLabel,
-        ...boxFor(outLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, scale)
-      },
-      position: outStub.position,
-      classes: 'portal portal-out'
-    });
-
-    nodes.push({
-      data: {
-        ...shared,
-        id: portalNodeId(c.id, 'in'),
-        portalSide: 'in',
-        anchorId: c.targetId,
-        zLayer: 0,
-        ...inStub.offset,
-        shape: 'tag',
-        parent: parentOf(tgt),
-        label: inLabel,
-        ...boxFor(inLabel, 'tag', PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, scale)
-      },
-      position: inStub.position,
-      classes: 'portal portal-in'
-    });
-
-    edges.push({
-      data: {
-        ...shared,
-        id: portalEdgeId(c.id, 'out'),
-        source: c.sourceId,
-        target: portalNodeId(c.id, 'out'),
-        label: '',
-        labelWidth: 0
-      },
-      classes: 'stub stub-out'
-    });
-
-    edges.push({
-      data: {
-        ...shared,
-        id: portalEdgeId(c.id, 'in'),
-        source: portalNodeId(c.id, 'in'),
-        target: c.targetId,
-        label: '',
-        labelWidth: 0
-      },
-      classes: 'stub stub-in'
-    });
+    const srcPos = positionOf(src);
+    const tgtPos = positionOf(tgt);
+    nodes.push(placeStub(els[0], srcPos, offsetOverrides[portalNodeId(c.id, 'out')]));
+    nodes.push(placeStub(els[1], tgtPos, offsetOverrides[portalNodeId(c.id, 'in')]));
+    edges.push(els[2], els[3]);
   }
 
   return [...nodes, ...edges];

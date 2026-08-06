@@ -24,6 +24,14 @@ export const PALETTE = {
 /** Neutral translucency of a grouping box; `groupLayers` ramps around it. */
 export const GROUP_OPACITY = { fill: 0.18, border: 0.75 };
 
+/**
+ * Every name is drawn on an opaque plate in its element's own colour, so that
+ * overlapping names occlude — the nearest one stays readable — instead of
+ * interleaving into unreadable noise. The padding is per side, in text units:
+ * it scales with the name, the same way the font does.
+ */
+export const PLATE_PAD = 4;
+
 export interface Option {
   value: string;
   label: string;

@@ -1,14 +1,9 @@
 import type { Core } from 'cytoscape';
 import type { Settings } from '../state/settings';
-import { viewScaleFactor } from './viewScale';
+import { MAX_ZOOM, MIN_ZOOM, textFactorAt } from './viewScale';
 
 /** Groupings are padding around their children; `groupLayout` uses the same figure. */
 const GROUP_PADDING = 34;
-
-/* `viewScaleFactor` clamps the zoom to [0.01, 8] internally, so these bracket
-   every factor the app can ever produce. */
-const PROBE_IN = 8;
-const PROBE_OUT = 1e-6;
 
 export interface Box {
   x1: number;
@@ -20,14 +15,13 @@ export interface Box {
 }
 
 /**
- * The drawn extent of the map as an affine function of the compensation factor:
- * `x2(f) = ax2 + bx2·f`, and so on.
- *
- * Under compensation a node's drawn *model* size is `w·f`, so the extent is
- * `min/max` of lines in `f` — convex for the upper bounds, concave for the lower
- * ones. The chord through the exact extents at the two extreme factors therefore
- * **encloses** the true extent everywhere between and is exact at both ends: a
- * conservative model that costs one arithmetic pass and no `boundingBox()`.
+ * The drawn extent as an affine function of the *text* factor: `x2(f) = ax2 +
+ * bx2·f`. Boxes are static now — only a compensated name plate can push past
+ * a room's own edge — so each half-extent is `max(box/2, plate/2 · f)`, which
+ * is convex in `f`. The chord through the exact extents at the two extreme
+ * factors therefore encloses the truth and is exact at both ends: the same
+ * argument the old box-compensated model relied on, just with one fewer
+ * moving part.
  */
 export interface ExtentModel {
   ax1: number;
@@ -48,14 +42,34 @@ export function drawnExtentAt(m: ExtentModel, f: number): Box {
   return { x1, y1, x2, y2, w: Math.max(1e-6, x2 - x1), h: Math.max(1e-6, y2 - y1) };
 }
 
-/** One O(N) pass over positions and `data.w/h`. Never touches a Cytoscape cache. */
-export function drawnExtentModel(
-  cy: Core,
-  baseScale: number,
-  settings: Settings
-): ExtentModel | null {
-  const fLo = viewScaleFactor(PROBE_IN, settings);
-  const fHi = viewScaleFactor(PROBE_OUT, settings);
+/* One model per canvas, invalidated by geometry, not by the viewport. The
+   scrollbars, the zoom floor and Fit all read it — it used to be measured
+   three times, with three full node-collection allocations. */
+interface Cached {
+  model: ExtentModel | null;
+  dirty: boolean;
+  settings: Settings | null;
+}
+const cache = new WeakMap<Core, Cached>();
+
+export function invalidateExtent(cy: Core) {
+  const c = cache.get(cy);
+  if (c) c.dirty = true;
+}
+
+export function extentModel(cy: Core, settings: Settings): ExtentModel | null {
+  let c = cache.get(cy);
+  if (!c) cache.set(cy, (c = { model: null, dirty: true, settings: null }));
+  if (!c.dirty && c.settings === settings) return c.model;
+  c.model = compute(cy, settings);
+  c.settings = settings;
+  c.dirty = false;
+  return c.model;
+}
+
+function compute(cy: Core, settings: Settings): ExtentModel | null {
+  const fLo = textFactorAt(MAX_ZOOM, settings);
+  const fHi = textFactorAt(MIN_ZOOM, settings);
 
   let lx1 = Infinity,
     ly1 = Infinity,
@@ -75,33 +89,40 @@ export function drawnExtentModel(
     }
     if (typeof d.w !== 'number' || typeof d.h !== 'number') return;
     const p = n.position();
-    const hw = d.w / 2;
-    const hh = d.h / 2;
+    const lw = typeof d.lw === 'number' ? d.lw : 0;
+    const lh = typeof d.lh === 'number' ? d.lh : 0;
 
-    if (p.x - hw * fLo < lx1) lx1 = p.x - hw * fLo;
-    if (p.x + hw * fLo > lx2) lx2 = p.x + hw * fLo;
-    if (p.y - hh * fLo < ly1) ly1 = p.y - hh * fLo;
-    if (p.y + hh * fLo > ly2) ly2 = p.y + hh * fLo;
+    /* the box is constant in f; the name plate scales with it — the
+       half-extent max(box, plate·f) is convex in f, so the chord argument
+       still encloses it exactly */
+    const hwLo = Math.max(d.w, lw * fLo) / 2;
+    const hhLo = Math.max(d.h, lh * fLo) / 2;
+    const hwHi = Math.max(d.w, lw * fHi) / 2;
+    const hhHi = Math.max(d.h, lh * fHi) / 2;
 
-    if (p.x - hw * fHi < hx1) hx1 = p.x - hw * fHi;
-    if (p.x + hw * fHi > hx2) hx2 = p.x + hw * fHi;
-    if (p.y - hh * fHi < hy1) hy1 = p.y - hh * fHi;
-    if (p.y + hh * fHi > hy2) hy2 = p.y + hh * fHi;
+    if (p.x - hwLo < lx1) lx1 = p.x - hwLo;
+    if (p.x + hwLo > lx2) lx2 = p.x + hwLo;
+    if (p.y - hhLo < ly1) ly1 = p.y - hhLo;
+    if (p.y + hhLo > ly2) ly2 = p.y + hhLo;
+
+    if (p.x - hwHi < hx1) hx1 = p.x - hwHi;
+    if (p.x + hwHi > hx2) hx2 = p.x + hwHi;
+    if (p.y - hhHi < hy1) hy1 = p.y - hhHi;
+    if (p.y + hhHi > hy2) hy2 = p.y + hhHi;
   });
 
   if (!Number.isFinite(lx1)) return null;
 
   if (hasGroup) {
-    /* the drawn grouping padding is `30 · baseScale · f`, so it scales too */
-    const pad = GROUP_PADDING * Math.max(0.05, baseScale);
-    lx1 -= pad * fLo;
-    lx2 += pad * fLo;
-    ly1 -= pad * fLo;
-    ly2 += pad * fLo;
-    hx1 -= pad * fHi;
-    hx2 += pad * fHi;
-    hy1 -= pad * fHi;
-    hy2 += pad * fHi;
+    /* grouping padding is fixed model geometry — it never scales */
+    lx1 -= GROUP_PADDING;
+    lx2 += GROUP_PADDING;
+    ly1 -= GROUP_PADDING;
+    ly2 += GROUP_PADDING;
+    hx1 -= GROUP_PADDING;
+    hx2 += GROUP_PADDING;
+    hy1 -= GROUP_PADDING;
+    hy2 += GROUP_PADDING;
   }
 
   /* compensation off: the factor never moves, so the model is a constant */
@@ -130,11 +151,11 @@ export function drawnExtentModel(
 /**
  * The largest zoom at which the whole map is on screen.
  *
- * `rendered(z) = W(f(z))·z = aW·z + bW·z^(1−s)` is strictly increasing for any
- * compensation strength `s ∈ [0,1]`, so "does it fit" is monotone and a geometric
- * bisection finds the boundary. There is no closed-form ratio: at `s = 1` the box
- * term is constant in rendered pixels, and the fit only exists at all because
- * `viewScaleFactor` saturates the factor below `zoom = 0.01`.
+ * `rendered(z) = W(f(z))·z = aW·z + bW·z^(1−s)` is strictly increasing, so
+ * "does it fit" is monotone and geometric bisection finds the boundary. There
+ * is no closed form: at strength 1 the plate term is constant in rendered
+ * pixels, and the fit exists at all only because `textFactorAt` saturates at
+ * `MAX_COMPENSATION`.
  */
 export function fitZoom(
   model: ExtentModel,
@@ -145,7 +166,7 @@ export function fitZoom(
   ceiling: number
 ): number {
   const fits = (z: number) => {
-    const b = drawnExtentAt(model, viewScaleFactor(z, settings));
+    const b = drawnExtentAt(model, textFactorAt(z, settings));
     return b.w * z <= usableW && b.h * z <= usableH;
   };
 
