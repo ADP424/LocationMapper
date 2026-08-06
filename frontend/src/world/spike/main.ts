@@ -21,7 +21,8 @@ import { AnvilError } from '../anvil/errors';
 import { meshWorld, type FaceBuffers } from '../mesh/faces';
 import { writeRegion } from '../anvil/testkit/regionWrite';
 import { synthesiseChunks } from '../anvil/testkit/syntheticWorld';
-import { loadArea } from '../source/area';
+import { FlyControls } from '../scene/flyControls';
+import { WorldStreamer, type StreamStats } from '../stream/streamer';
 import {
   canPickDirectory,
   fromDirectoryInput,
@@ -46,9 +47,11 @@ const statusEl = document.getElementById('status')!;
 const worldEl = document.getElementById('world')!;
 const loaderEl = document.getElementById('loader')!;
 const dimSelect = document.getElementById('dim') as HTMLSelectElement;
-const budgetSelect = document.getElementById('budget') as HTMLSelectElement;
+const distanceSelect = document.getElementById('distance') as HTMLSelectElement;
 const centreSelect = document.getElementById('centre') as HTMLSelectElement;
 const loadButton = document.getElementById('load') as HTMLButtonElement;
+const walkButton = document.getElementById('walk') as HTMLButtonElement;
+const streamEl = document.getElementById('stream')!;
 const pickButton = document.getElementById('pick') as HTMLButtonElement;
 const pickNote = document.getElementById('pick-note')!;
 const pathInput = document.getElementById('path') as HTMLInputElement;
@@ -67,6 +70,29 @@ scene.fog = new THREE.Fog(0x8fb8de, 260, 900);
 const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 8000);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+
+/**
+ * Two cameras over one camera object.
+ *
+ * Orbiting is right for looking at a loaded area from outside; a maze is
+ * interior and reads as a solid box from out there, so the fly camera is what
+ * actually lets you see it. They share `camera`, so switching never teleports.
+ */
+const fly = new FlyControls(camera, canvas, {
+  onActiveChange: (active) => {
+    controls.enabled = !active;
+    walkButton.textContent = active ? 'Exit first person (Esc)' : 'Enter first person (F)';
+    document.body.classList.toggle('flying', active);
+    if (!active) {
+      /* Hand the orbit camera a target in front of where the fly camera was
+         left, or it snaps back to wherever the last orbit target was. */
+      const ahead = new THREE.Vector3();
+      camera.getWorldDirection(ahead);
+      controls.target.copy(camera.position).addScaledVector(ahead, 24);
+      controls.update();
+    }
+  }
+});
 
 type WorldMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 
@@ -301,6 +327,10 @@ function describeWorld(src: WorldSource) {
 
 async function openSource(load: () => Promise<WorldSource>) {
   errEl.textContent = '';
+  /* A new world means new region files; the streamer holds refs into the old
+     one, so it cannot survive the swap. */
+  stopStreaming();
+  lastDimension = null;
   busy(true);
   status('reading folder…');
   try {
@@ -319,75 +349,93 @@ async function openSource(load: () => Promise<WorldSource>) {
   }
 }
 
-/** Last thing loaded, so recentring does not need the dropdowns re-read. */
+/* ---------------------------------------------------------- streaming */
+
+/**
+ * Streaming replaces the one-shot area load for real worlds.
+ *
+ * The test world is 72,909 chunks and the measured ceiling is around a thousand
+ * at once, so there is no budget at which "the whole world" fits. What there is
+ * instead is a window that follows the camera: fly anywhere and the world is
+ * there when you arrive, at whatever render distance the hardware sustains.
+ */
+let streamer: WorldStreamer | null = null;
 let lastDimension: DimensionRef | null = null;
 
-async function loadAreaAt(x: number, z: number, y: number) {
-  if (!source) return;
-  const dimension = lastDimension ?? source.dimensions[dimSelect.selectedIndex];
-  if (!dimension) return;
+function stopStreaming() {
+  streamer?.dispose();
+  streamer = null;
+  streamEl.hidden = true;
+}
+
+function showStream(s: StreamStats) {
+  streamEl.hidden = false;
+  const rows: Array<[string, string]> = [
+    ['chunks drawn', n(s.meshed)],
+    ['chunks in memory', n(s.loaded)],
+    ...(s.pending ? ([['queued', n(s.pending)]] as Array<[string, string]>) : []),
+    ['faces', n(s.faces)],
+    ['vertex data', mb(s.vertexBytes)],
+    ['regions fetched', `${n(s.regionsFetched)} — ${mb(s.bytesFetched)}`],
+    ['regions cached', `${n(s.regionsHeld)} — ${mb(s.bytesHeld)}`],
+    ['draw calls', String(renderer.info.render.calls)],
+    ['triangles', n(renderer.info.render.triangles)]
+  ];
+  streamEl.innerHTML =
+    `<div class="row"><span>state</span><span>${
+      s.working ? 'streaming…' : 'idle'
+    }</span></div>` +
+    rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+}
+
+/** Put the camera at a world position and stream around it. */
+function goTo(dimension: DimensionRef, x: number, y: number, z: number) {
+  clearMeshes(); // any static geometry from the synthetic/single-file paths
   lastDimension = dimension;
-
-  const centre = { x: Math.round(x), z: Math.round(z), y: Math.round(y), label: '' };
-  const budget = Number(budgetSelect.value);
-
   errEl.textContent = '';
-  busy(true);
-  try {
-    const area = await loadArea(dimension, centre.x, centre.z, budget, status);
-    status('');
+  report([]);
 
-    if (area.chunks.length === 0) {
-      errEl.textContent =
-        area.firstFailure || 'No renderable chunks near that point. Try a different centre.';
-      report([]);
-      return;
-    }
-
-    render(
-      area.chunks,
-      [
-        ['dimension', dimension.label],
-        ['centre', `${centre.x}, ${centre.z}`],
-        ['regions scanned', n(area.regionsScanned)],
-        ['regions read', `${n(area.regionsRead)} — ${mb(area.bytesRead)}`],
-        ['chunks available', n(area.chunksAvailable)],
-        ['chunks loaded', n(area.chunks.length)],
-        ['header scan', `${area.headerMs.toFixed(0)} ms`],
-        ['read + parse', `${area.readMs.toFixed(0)} ms`],
-        ['area', `${area.maxX - area.minX + 1} x ${area.maxZ - area.minZ + 1} blocks`],
-        ...(area.skipped
-          ? ([['partial chunks skipped', n(area.skipped), true]] as Array<[string, string, boolean]>)
-          : []),
-        ...(area.failed
-          ? ([['chunks failed', n(area.failed), true]] as Array<[string, string, boolean]>)
-          : [])
-      ],
-      centre.y
-    );
-
-    if (area.failed && area.firstFailure) errEl.textContent = area.firstFailure;
-  } catch (e) {
-    errEl.textContent = e instanceof AnvilError ? e.message : String(e);
-    status('');
-  } finally {
-    busy(false);
+  if (!streamer) {
+    streamer = new WorldStreamer(scene, dimension, {
+      radius: Number(distanceSelect.value),
+      onStats: showStream,
+      onError: (m) => {
+        errEl.textContent = m;
+      }
+    });
   }
+
+  camera.position.set(x, y + 2, z);
+  camera.far = 4000;
+  camera.updateProjectionMatrix();
+
+  /* Look along +X at the horizon rather than down at the ground, so the first
+     frame after a jump shows the world rather than the block underfoot. */
+  controls.target.set(x + 32, y + 2, z);
+  controls.update();
+
+  const far = Number(distanceSelect.value) * 16;
+  scene.fog = new THREE.Fog(0x8fb8de, far * 0.55, far * 1.05);
+  status('');
 }
 
 function loadSelectedArea() {
   if (!source) return;
   const dimension = source.dimensions[dimSelect.selectedIndex];
   if (!dimension) return;
-  lastDimension = dimension;
+
+  /* A different dimension is a different region set — the streamer is bound to
+     one, so switching means a new one. */
+  if (lastDimension && lastDimension !== dimension) stopStreaming();
+
   const centre = centresFor(dimension)[centreSelect.selectedIndex] ?? { x: 0, z: 0, y: 70 };
-  void loadAreaAt(centre.x, centre.z, centre.y);
+  goTo(dimension, centre.x, centre.y, centre.z);
 }
 
 /* ------------------------------------------------------------- navigation */
 
 /**
- * Click a block to reload the area centred there.
+ * Click a block to jump the camera there.
  *
  * Distinguished from an orbit drag by how far the pointer moved: OrbitControls
  * owns the drag, and stealing it would make the view unusable.
@@ -397,38 +445,63 @@ const pointer = new THREE.Vector2();
 let pressAt: { x: number; y: number } | null = null;
 
 canvas.addEventListener('pointerdown', (e) => {
-  if (e.button === 0) pressAt = { x: e.clientX, y: e.clientY };
+  if (e.button === 0 && !fly.active) pressAt = { x: e.clientX, y: e.clientY };
 });
 
 canvas.addEventListener('pointerup', (e) => {
-  if (e.button !== 0 || !pressAt) return;
+  if (e.button !== 0 || !pressAt || fly.active) return;
   const moved = Math.hypot(e.clientX - pressAt.x, e.clientY - pressAt.y);
   pressAt = null;
-  if (moved > 4 || current.length === 0 || !source) return;
+  if (moved > 4) return;
 
   const rect = canvas.getBoundingClientRect();
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
 
-  const hit = raycaster.intersectObjects(current, false)[0];
+  const hit = raycaster.intersectObjects(streamer ? scene.children : current, true)[0];
   if (!hit) return;
 
-  status(`recentring on ${Math.round(hit.point.x)}, ${Math.round(hit.point.z)}…`);
-  void loadAreaAt(hit.point.x, hit.point.z, hit.point.y);
+  if (streamer && lastDimension) {
+    /* Land above the block rather than inside it — clicking a floor and being
+       buried in it is a rotten way to arrive somewhere. */
+    goTo(lastDimension, hit.point.x, hit.point.y + 1, hit.point.z);
+    status(`moved to ${Math.round(hit.point.x)}, ${Math.round(hit.point.z)}`);
+  } else {
+    controls.target.copy(hit.point);
+    controls.update();
+  }
 });
 
-/** R reloads around wherever the camera is looking. */
+walkButton.addEventListener('click', () => {
+  if (fly.active) fly.exit();
+  else fly.enter();
+});
+
 window.addEventListener('keydown', (e) => {
-  const typing = (e.target as HTMLElement)?.tagName === 'INPUT';
-  if (typing || e.key.toLowerCase() !== 'r' || !source || loadButton.disabled) return;
-  const t = controls.target;
-  void loadAreaAt(t.x, t.z, t.y);
+  if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+
+  /* F is the toggle in both directions; Escape is handled by the browser, which
+     releases the lock on its own. */
+  if (e.code === 'KeyF' && !fly.active) {
+    fly.enter();
+    e.preventDefault();
+    return;
+  }
+
+  /* Speed on the scroll wheel would fight zoom, so it lives on the number row
+     the way every other flying camera does. */
+  if (fly.active && e.code >= 'Digit1' && e.code <= 'Digit5') {
+    fly.speedScale = [0.25, 0.5, 1, 2, 4][Number(e.code.slice(5)) - 1];
+    status(`fly speed ${fly.speedScale}x`);
+  }
 });
 
 /* ------------------------------------------------------- single file paths */
 
 async function loadSingleRegion(bytes: Uint8Array, label: string) {
+  stopStreaming();
+  lastDimension = null;
   const loaded = await loadRegion(bytes, MAX_SINGLE_FILE_CHUNKS);
   if (loaded.world.list.length === 0) {
     errEl.textContent = loaded.firstFailure || 'No renderable chunks in that region file.';
@@ -519,9 +592,28 @@ document.getElementById('dirfile')!.addEventListener('change', (ev) => {
   })();
 });
 
+distanceSelect.addEventListener('change', () => {
+  const chunks = Number(distanceSelect.value);
+  streamer?.setRadius(chunks);
+  if (streamer) scene.fog = new THREE.Fog(0x8fb8de, chunks * 8.8, chunks * 16.8);
+});
+
+let lastFrame = performance.now();
+
 renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  /* Clamped: a backgrounded tab resumes with a multi-second gap, and an
+     unclamped dt would fling the camera across the world. */
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
+
   resize();
-  controls.update();
+  if (fly.active) fly.update(dt);
+  else controls.update();
+
+  /* Orbiting loads around what you are looking at; flying loads around you. */
+  streamer?.update(fly.active ? camera.position : controls.target);
+
   renderer.render(scene, camera);
 });
 

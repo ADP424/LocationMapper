@@ -69,6 +69,24 @@
       #unknown { margin-top: 8px; color: #e8a33d; font-size: 11px; }
       .hint { position: fixed; bottom: 12px; left: 12px; color: #565f6b; font-size: 11px; }
       .note { color: #565f6b; font-size: 10px; margin: 2px 0 0; }
+      kbd {
+        font: inherit; background: #1c222b; border: 1px solid #333c47;
+        border-radius: 3px; padding: 0 4px;
+      }
+
+      /* Pointer is locked while flying: the HUD cannot be clicked anyway, and a
+         crosshair is the only thing that tells you where "forward" is. */
+      #stream { margin-top: 8px; }
+      body.flying #hud { opacity: 0.4; pointer-events: none; }
+      #crosshair { display: none; position: fixed; inset: 0; margin: auto; width: 11px; height: 11px; }
+      body.flying #crosshair { display: block; }
+      #crosshair::before, #crosshair::after {
+        content: ''; position: absolute; background: #fff; opacity: 0.75;
+        box-shadow: 0 0 2px #000;
+      }
+      #crosshair::before { left: 5px; top: 0; width: 1px; height: 11px; }
+      #crosshair::after { top: 5px; left: 0; height: 1px; width: 11px; }
+      body.flying .hint { color: #98a3b0; }
     </style>
   </head>
   <body>
@@ -76,7 +94,7 @@
 
     <div id="hud">
       <h1>Anvil render spike</h1>
-      <p class="sub">Phase 0 — naive per-block cubes, no greedy meshing</p>
+      <p class="sub">face-culled meshing · streamed around the camera</p>
 
       <div class="controls">
         <label for="path">world folder on this machine</label>
@@ -101,33 +119,55 @@
           <select id="dim"></select>
         </div>
         <div class="field">
-          <label for="budget">chunks</label>
-          <select id="budget">
-            <option value="64">64 — 128 blocks across</option>
-            <option value="144">144</option>
-            <option value="256" selected>256 — 256 blocks across</option>
-            <option value="576">576</option>
-            <option value="1024">1024 — 512 blocks across</option>
-            <option value="2048">2048 — heavy</option>
-            <option value="4096">4096 — will likely stall</option>
+          <label for="distance">render dist</label>
+          <select id="distance">
+            <option value="4">4 chunks — 128 blocks</option>
+            <option value="8">8 chunks — 256 blocks</option>
+            <option value="12" selected>12 chunks — 384 blocks</option>
+            <option value="16">16 chunks — 512 blocks</option>
+            <option value="20">20 chunks — heavy</option>
+            <option value="24">24 chunks — very heavy</option>
           </select>
         </div>
         <div class="field">
-          <label for="centre">centre</label>
+          <label for="centre">start at</label>
           <select id="centre"></select>
         </div>
-        <button id="load" class="primary">Load area</button>
-        <p class="note">click any block to recentre there · <kbd>R</kbd> reloads around the view</p>
+        <button id="load" class="primary">Go there</button>
+        <button id="walk">Enter first person (F)</button>
+        <p class="note">
+          the world streams in around the camera — fly anywhere, it keeps loading ·
+          click any block to jump to it
+        </p>
       </div>
 
       <div id="status"></div>
+      <div id="stream" hidden></div>
       <hr />
       <div id="stats"></div>
       <div id="err"></div>
       <div id="unknown"></div>
     </div>
 
-    <p class="hint">drag to orbit · scroll to zoom · right-drag to pan</p>
+    <div id="crosshair"></div>
+
+    <p class="hint" id="hint">
+      drag to orbit · scroll to zoom · right-drag to pan · <kbd>F</kbd> for first person
+    </p>
+
+    <script>
+      /* Swapped rather than rewritten in TS: the two hint strings are page
+         copy, and keeping them next to the markup they describe is clearer. */
+      const orbitHint = document.getElementById('hint').innerHTML;
+      const flyHint =
+        '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move · <kbd>Space</kbd> up · ' +
+        '<kbd>C</kbd> down · <kbd>Shift</kbd> sprint · ' +
+        '<kbd>1</kbd>–<kbd>5</kbd> speed · <kbd>Esc</kbd> release';
+      new MutationObserver(() => {
+        document.getElementById('hint').innerHTML =
+          document.body.classList.contains('flying') ? flyHint : orbitHint;
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    </script>
     <script type="module" src="/src/world/spike/main.ts"></script>
   </body>
 </html>

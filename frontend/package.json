@@ -11,7 +11,9 @@
     "verify:anvil": "tsx scripts/verify-anvil.ts",
     "verify:spike": "tsx scripts/verify-spike.ts",
     "verify:stitch": "tsx scripts/verify-stitch.ts",
-    "inspect": "tsx scripts/inspect-region.ts"
+    "inspect": "tsx scripts/inspect-region.ts",
+    "census": "tsx scripts/block-census.ts",
+    "verify:stream": "tsx scripts/verify-stream.ts"
   },
   "dependencies": {
     "cytoscape": "^3.29.2",
