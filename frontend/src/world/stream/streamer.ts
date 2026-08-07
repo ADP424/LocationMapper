@@ -112,6 +112,17 @@ export class WorldStreamer {
     this.scene.add(this.group);
   }
 
+  /**
+   * The node holding every chunk mesh.
+   *
+   * Exposed so a picker can raycast the world and nothing else: walking the
+   * whole scene would also hit overlay markers and gizmo handles, and would
+   * cost a traversal per click.
+   */
+  get object(): THREE.Object3D {
+    return this.group;
+  }
+
   /** Render distance in chunks. Changing it replans on the next frame. */
   setRadius(chunks: number) {
     if (chunks === this.radius) return;

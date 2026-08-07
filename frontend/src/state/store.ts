@@ -30,6 +30,9 @@ import type {
 
 export type Mode = 'select' | 'add-location' | 'connect';
 
+/** Which canvas is mounted. The store is shared, so selection survives a swap. */
+export type ViewMode = '2d' | '3d';
+
 interface ConnectionDefaults {
   direction: Direction;
   ephemeral: boolean;
@@ -81,6 +84,9 @@ interface Store {
   mode: Mode;
   pendingSource: string | null;
   contextMenu: ContextMenuState | null;
+  viewMode: ViewMode;
+  /** Location waiting for the user to click a block to place it in 3D. */
+  placingId: string | null;
   layout: LayoutName;
   layoutNonce: number;
   labelMode: LabelMode;
@@ -95,6 +101,8 @@ interface Store {
   pendingPositions: Record<string, { x: number; y: number }>;
   /** Unsaved stub offsets, keyed by portal node id. */
   pendingPortalOffsets: Record<string, { dx: number; dy: number }>;
+  /** Unsaved block coordinates from a 3D drag, keyed by location id. */
+  pendingCoords: Record<string, { x: number; y: number; z: number }>;
 
   init: () => Promise<void>;
   refreshMaps: () => Promise<void>;
@@ -112,6 +120,8 @@ interface Store {
   selectConnectionLabel: (id: string) => void;
   setMultiSelect: (ids: string[]) => void;
   setMode: (m: Mode) => void;
+  setViewMode: (m: ViewMode) => void;
+  setPlacing: (id: string | null) => void;
   setLayout: (l: LayoutName) => void;
   runLayout: () => void;
   setLabelMode: (m: LabelMode) => void;
@@ -139,6 +149,7 @@ interface Store {
   resetAllVisited: () => Promise<void>;
 
   createLocationAt: (x: number, y: number, groupId?: string | null) => Promise<void>;
+  createLocationAtBlock: (x: number, y: number, z: number) => Promise<void>;
   updateLocation: (id: string, patch: Partial<Location>) => Promise<void>;
   bulkUpdateLocations: (ids: string[], patch: Partial<Location>) => Promise<void>;
   deleteLocation: (id: string) => Promise<void>;
@@ -180,6 +191,8 @@ interface Store {
   queuePosition: (id: string, x: number, y: number) => void;
   queuePortalOffset: (portalId: string, dx: number, dy: number) => void;
   flushPositions: () => Promise<void>;
+  queueCoords: (id: string, x: number, y: number, z: number) => void;
+  flushCoords: () => Promise<void>;
   persistLayoutPositions: (
     positions: Array<{ id: string; x: number; y: number }>,
     portalOffsets: PortalOffset[]
@@ -217,7 +230,12 @@ function mergePortalOffsets(
 let positionTimer: ReturnType<typeof setTimeout> | null = null;
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let tripTimer: ReturnType<typeof setTimeout> | null = null;
+let coordTimer: ReturnType<typeof setTimeout> | null = null;
 const TRIP_DEBOUNCE_MS = 250;
+/* A gizmo drag emits a position every frame; only the one it settles on is
+   worth a request. Shorter than the 2D debounce because a 3D drag ends on
+   mouse-up rather than trailing off. */
+const COORD_DEBOUNCE_MS = 350;
 
 export const useGraphStore = create<Store>()((set, get) => {
   const flash = (msg: string) => {
@@ -245,6 +263,10 @@ export const useGraphStore = create<Store>()((set, get) => {
   const cancelTripDebounce = () => {
     if (tripTimer) clearTimeout(tripTimer);
     tripTimer = null;
+  };
+  const cancelCoordFlush = () => {
+    if (coordTimer) clearTimeout(coordTimer);
+    coordTimer = null;
   };
 
   /**
@@ -290,6 +312,8 @@ export const useGraphStore = create<Store>()((set, get) => {
     mode: 'select',
     pendingSource: null,
     contextMenu: null,
+    viewMode: '2d',
+    placingId: null,
     layout: 'elk-layered',
     layoutNonce: 0,
     labelMode: 'names',
@@ -302,6 +326,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     trip: { ...EMPTY_TRIP },
     pendingPositions: {},
     pendingPortalOffsets: {},
+    pendingCoords: {},
 
     init: async () => {
       await get().refreshMaps();
@@ -316,6 +341,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     openMap: async (id) => {
       /* a drag within the debounce window must not be lost */
       await get().flushPositions();
+      await get().flushCoords();
       cancelPositionFlush();
       cancelTripDebounce();
       plannerRun?.discard();
@@ -338,8 +364,10 @@ export const useGraphStore = create<Store>()((set, get) => {
           pendingSource: null,
           contextMenu: null,
           mode: 'select',
+          placingId: null,
           pendingPositions: {},
           pendingPortalOffsets: {},
+          pendingCoords: {},
           layout: allPositioned ? 'preset' : s.layout,
           layoutNonce: s.layoutNonce + 1,
           trip: { ...EMPTY_TRIP, mode: s.trip.mode, axes: s.trip.axes, autoPlan: s.trip.autoPlan }
@@ -357,6 +385,7 @@ export const useGraphStore = create<Store>()((set, get) => {
 
     deleteMap: async (id) => {
       await get().flushPositions();
+      await get().flushCoords();
       cancelPositionFlush();
       await guard(() => api.deleteMap(id));
       if (get().mapId === id) {
@@ -371,8 +400,10 @@ export const useGraphStore = create<Store>()((set, get) => {
           connections: {},
           selection: null,
           multiSelect: [],
+          placingId: null,
           pendingPositions: {},
           pendingPortalOffsets: {},
+          pendingCoords: {},
           trip: { ...EMPTY_TRIP }
         });
       }
@@ -425,6 +456,15 @@ export const useGraphStore = create<Store>()((set, get) => {
 
     setMode: (mode) =>
       set({ mode, pendingSource: mode === 'connect' ? get().pendingSource : null }),
+
+    /* Modes are per-canvas verbs: "click to connect" means nothing once the 3D
+       view is mounted, and a half-finished connection left behind would fire on
+       the first block clicked over there. */
+    setViewMode: (viewMode) =>
+      set({ viewMode, mode: 'select', pendingSource: null, placingId: null, contextMenu: null }),
+
+    setPlacing: (placingId) => set({ placingId, mode: 'select' }),
+
     setLayout: (layout) => set({ layout }),
     runLayout: () => set((s) => ({ layoutNonce: s.layoutNonce + 1 })),
     setLabelMode: (labelMode) => set({ labelMode }),
@@ -619,6 +659,37 @@ export const useGraphStore = create<Store>()((set, get) => {
       if (groupId) afterStructureChange();
     },
 
+    /**
+     * Drop a new location on a block.
+     *
+     * `x`/`y` are left null on purpose: those are the 2D canvas position, the
+     * 3D view never owns them, and a layout run will place the new room the
+     * next time the 2D canvas is asked to arrange itself.
+     */
+    createLocationAtBlock: async (x, y, z) => {
+      const { mapId } = get();
+      if (!mapId) return;
+      const created = await guardScoped(() =>
+        api.createLocation(mapId, {
+          name: 'New Location',
+          x: null,
+          y: null,
+          coordX: Math.round(x),
+          coordY: Math.round(y),
+          coordZ: Math.round(z)
+        })
+      );
+      if (!created) return;
+      set((s) => ({
+        locations: { ...s.locations, [created.id]: created },
+        selection: { type: 'location', id: created.id },
+        multiSelect: [],
+        mode: 'select'
+      }));
+      get().markTripStale();
+      flash(`Location Created At ${created.coordX}, ${created.coordY}, ${created.coordZ}`);
+    },
+
     updateLocation: async (id, patch) => {
       /* a pending draft can flush after its row is gone (Delete, map switch) */
       if (!get().locations[id]) return;
@@ -691,12 +762,16 @@ export const useGraphStore = create<Store>()((set, get) => {
               ? { ...c, requires: c.requires.filter((r) => !gone.has(r)) }
               : c;
           }
+          const pendingCoords = { ...s.pendingCoords };
+          for (const id of removed) delete pendingCoords[id];
           return {
             locations,
             connections,
             selection: null,
             multiSelect: [],
             contextMenu: null,
+            placingId: s.placingId && gone.has(s.placingId) ? null : s.placingId,
+            pendingCoords,
             trip: { ...s.trip, waypoints: s.trip.waypoints.filter((w) => !gone.has(w)) }
           };
         });
@@ -1072,6 +1147,72 @@ export const useGraphStore = create<Store>()((set, get) => {
         });
       } catch (err) {
         set({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+
+    /**
+     * A block coordinate straight from the 3D view.
+     *
+     * Applied to local state immediately so the marker, its label and every
+     * edge touching it follow the gizmo at frame rate, then written once the
+     * drag settles. Only `coord_*` is touched — `x`/`y` belong to the 2D
+     * canvas, and the two views would otherwise fight over the same row.
+     */
+    queueCoords: (id, x, y, z) => {
+      const location = get().locations[id];
+      if (!location) return;
+      const coordX = Math.round(x);
+      const coordY = Math.round(y);
+      const coordZ = Math.round(z);
+      if (location.coordX === coordX && location.coordY === coordY && location.coordZ === coordZ) {
+        return;
+      }
+      set((s) => ({
+        locations: { ...s.locations, [id]: { ...s.locations[id], coordX, coordY, coordZ } },
+        pendingCoords: { ...s.pendingCoords, [id]: { x: coordX, y: coordY, z: coordZ } }
+      }));
+      cancelCoordFlush();
+      coordTimer = setTimeout(() => void get().flushCoords(), COORD_DEBOUNCE_MS);
+    },
+
+    flushCoords: async () => {
+      cancelCoordFlush();
+      const { pendingCoords, locations, mapId } = get();
+      const entries = Object.entries(pendingCoords).filter(([id]) => locations[id]);
+      if (!entries.length) {
+        if (Object.keys(pendingCoords).length) set({ pendingCoords: {} });
+        return;
+      }
+
+      /* Taken before the requests go out: a drag that starts while these are in
+         flight queues into a fresh map rather than being wiped by this flush. */
+      set({ pendingCoords: {} });
+      const mapAtStart = mapId;
+
+      const { ok, failed, firstError } = await settleBatch(
+        entries.map(([id, c]) =>
+          api.updateLocation(id, { coordX: c.x, coordY: c.y, coordZ: c.z })
+        )
+      );
+      if (get().mapId !== mapAtStart) return;
+
+      if (ok.length) {
+        set((s) => {
+          const next = { ...s.locations };
+          /* Skip anything dragged again since: local state is ahead of what
+             this response describes. */
+          for (const loc of ok) if (!s.pendingCoords[loc.id]) next[loc.id] = loc;
+          return { locations: next };
+        });
+        get().markTripStale();
+      }
+      if (failed) {
+        const reason = firstError?.reason;
+        set({
+          error: `${failed} coordinate${failed === 1 ? '' : 's'} could not be saved${
+            reason instanceof Error ? `: ${reason.message}` : ''
+          }`
+        });
       }
     },
 

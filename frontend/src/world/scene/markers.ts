@@ -1,0 +1,185 @@
+/**
+ * Location markers: one instanced octahedron per placed location.
+ *
+ * Two meshes are drawn for every marker, at the same place. The solid one is
+ * depth-tested like ordinary geometry; the ghost is drawn last with depth
+ * testing off, so a marker inside a wall still shows faintly through it. That
+ * matters more here than it sounds: the worlds this is for are interiors, and a
+ * waypoint you cannot see until you are already in the room with it is not
+ * doing the one job it has.
+ *
+ * Both meshes share a geometry and a per-instance colour buffer, so the cost of
+ * the second one is a draw call.
+ */
+
+import * as THREE from 'three';
+
+export interface MarkerDatum {
+  id: string;
+  /** Any CSS colour; unparseable values fall back to white. */
+  color: string;
+  /** Block coordinates. The marker is centred in the block. */
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** Radius in blocks. Slightly under one so a marker sits inside its block. */
+const SIZE = 0.85;
+
+/** Instances are allocated in blocks of this, so small edits never reallocate. */
+const GRANULARITY = 64;
+
+const HIGHLIGHT_COLOR = 0xffd166;
+
+export class MarkerLayer {
+  readonly group = new THREE.Group();
+
+  private readonly geometry = new THREE.OctahedronGeometry(SIZE);
+  private readonly solidMaterial = new THREE.MeshBasicMaterial({ vertexColors: false });
+  private readonly ghostMaterial = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.25,
+    depthTest: false,
+    depthWrite: false
+  });
+
+  private solid: THREE.InstancedMesh | null = null;
+  private ghost: THREE.InstancedMesh | null = null;
+  private capacity = 0;
+
+  private data: MarkerDatum[] = [];
+  private readonly indexOf = new Map<string, number>();
+
+  private readonly highlight: THREE.LineSegments;
+  private selected: string | null = null;
+
+  private readonly matrix = new THREE.Matrix4();
+  private readonly colour = new THREE.Color();
+
+  constructor() {
+    this.group.name = 'markers';
+
+    const wire = new THREE.WireframeGeometry(new THREE.OctahedronGeometry(SIZE * 1.5));
+    this.highlight = new THREE.LineSegments(
+      wire,
+      new THREE.LineBasicMaterial({ color: HIGHLIGHT_COLOR, depthTest: false, transparent: true })
+    );
+    this.highlight.renderOrder = 12;
+    this.highlight.visible = false;
+    this.group.add(this.highlight);
+  }
+
+  /** Replace the marker set. Reuses the existing buffers when they still fit. */
+  setData(next: MarkerDatum[]) {
+    this.data = next;
+    this.indexOf.clear();
+    for (let i = 0; i < next.length; i++) this.indexOf.set(next[i].id, i);
+
+    if (next.length > this.capacity) this.allocate(Math.ceil(next.length / GRANULARITY) * GRANULARITY);
+    if (!this.solid || !this.ghost) return;
+
+    for (let i = 0; i < next.length; i++) {
+      const m = next[i];
+      this.matrix.makeTranslation(m.x + 0.5, m.y + 0.5, m.z + 0.5);
+      this.solid.setMatrixAt(i, this.matrix);
+      this.ghost.setMatrixAt(i, this.matrix);
+      this.readColour(m.color);
+      this.solid.setColorAt(i, this.colour);
+      this.ghost.setColorAt(i, this.colour);
+    }
+
+    this.solid.count = next.length;
+    this.ghost.count = next.length;
+    this.solid.instanceMatrix.needsUpdate = true;
+    this.ghost.instanceMatrix.needsUpdate = true;
+    if (this.solid.instanceColor) this.solid.instanceColor.needsUpdate = true;
+    if (this.ghost.instanceColor) this.ghost.instanceColor.needsUpdate = true;
+
+    /* Instanced bounds do not follow the matrices on their own, and a stale
+       sphere gets the whole layer frustum-culled from the wrong place. */
+    this.solid.computeBoundingSphere();
+    this.ghost.boundingSphere = this.solid.boundingSphere;
+
+    this.refreshHighlight();
+  }
+
+  setSelected(id: string | null) {
+    this.selected = id;
+    this.refreshHighlight();
+  }
+
+  /** Centre of a marker in world space, or null if it is not placed. */
+  positionOf(id: string): THREE.Vector3 | null {
+    const i = this.indexOf.get(id);
+    if (i === undefined) return null;
+    const m = this.data[i];
+    return new THREE.Vector3(m.x + 0.5, m.y + 0.5, m.z + 0.5);
+  }
+
+  /**
+   * Nearest marker along the ray, if any.
+   *
+   * Occlusion is not considered on purpose: a marker behind a wall is drawn by
+   * the ghost pass, so it has to be clickable too, or the thing you can plainly
+   * see cannot be selected.
+   */
+  pick(raycaster: THREE.Raycaster): { id: string; distance: number } | null {
+    if (!this.solid || this.solid.count === 0) return null;
+    const hit = raycaster.intersectObject(this.solid, false)[0];
+    if (!hit || hit.instanceId === undefined) return null;
+    const datum = this.data[hit.instanceId];
+    return datum ? { id: datum.id, distance: hit.distance } : null;
+  }
+
+  dispose() {
+    this.disposeMeshes();
+    this.geometry.dispose();
+    this.solidMaterial.dispose();
+    this.ghostMaterial.dispose();
+    this.highlight.geometry.dispose();
+    (this.highlight.material as THREE.Material).dispose();
+  }
+
+  /* ------------------------------------------------------------ internals */
+
+  private allocate(capacity: number) {
+    this.disposeMeshes();
+    this.capacity = capacity;
+
+    this.solid = new THREE.InstancedMesh(this.geometry, this.solidMaterial, capacity);
+    this.ghost = new THREE.InstancedMesh(this.geometry, this.ghostMaterial, capacity);
+    this.ghost.renderOrder = 10;
+
+    for (const mesh of [this.solid, this.ghost]) {
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.count = 0;
+      this.group.add(mesh);
+    }
+  }
+
+  private disposeMeshes() {
+    for (const mesh of [this.solid, this.ghost]) {
+      if (!mesh) continue;
+      this.group.remove(mesh);
+      mesh.dispose();
+    }
+    this.solid = null;
+    this.ghost = null;
+    this.capacity = 0;
+  }
+
+  private readColour(css: string) {
+    try {
+      this.colour.setStyle(css || '#ffffff');
+    } catch {
+      this.colour.set(0xffffff);
+    }
+  }
+
+  private refreshHighlight() {
+    const at = this.selected ? this.positionOf(this.selected) : null;
+    this.highlight.visible = at !== null;
+    if (at) this.highlight.position.copy(at);
+  }
+}

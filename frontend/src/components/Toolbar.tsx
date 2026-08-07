@@ -11,6 +11,8 @@ export default function Toolbar() {
 
   const mode = useGraphStore((s) => s.mode);
   const setMode = useGraphStore((s) => s.setMode);
+  const viewMode = useGraphStore((s) => s.viewMode);
+  const setViewMode = useGraphStore((s) => s.setViewMode);
   const layout = useGraphStore((s) => s.layout);
   const setLayout = useGraphStore((s) => s.setLayout);
   const runLayout = useGraphStore((s) => s.runLayout);
@@ -32,12 +34,34 @@ export default function Toolbar() {
         <strong className="brand">MapGraph</strong>
       </div>
 
+      <div className="toolbar-group" title="The Same Map, Drawn Two Ways">
+        <button
+          className={viewMode === '2d' ? 'active' : ''}
+          disabled={disabled}
+          onClick={() => setViewMode('2d')}
+        >
+          2D Graph
+        </button>
+        <button
+          className={viewMode === '3d' ? 'active' : ''}
+          disabled={disabled}
+          onClick={() => setViewMode('3d')}
+          title="Show The Map In A Minecraft World, Using Its X/Y/Z Coordinates"
+        >
+          3D World
+        </button>
+      </div>
+
       <div className="toolbar-group">
         <button
           className={mode === 'add-location' ? 'active' : ''}
           disabled={disabled}
           onClick={() => setMode(mode === 'add-location' ? 'select' : 'add-location')}
-          title="Click The Canvas To Drop A New Location"
+          title={
+            viewMode === '3d'
+              ? 'Click A Block To Drop A New Location'
+              : 'Click The Canvas To Drop A New Location'
+          }
         >
           + Location
         </button>
@@ -77,6 +101,10 @@ export default function Toolbar() {
         />
       </div>
 
+      {/* Arranging and fitting belong to the Cytoscape canvas; the 3D view has
+          its own framing controls over the canvas itself. Removed rather than
+          `hidden`, which `.toolbar-group { display: flex }` would override. */}
+      {viewMode === '2d' && (
       <div className="toolbar-group">
         <label className="inline-label">
           Layout
@@ -103,6 +131,7 @@ export default function Toolbar() {
           Fit
         </button>
       </div>
+      )}
 
       <div className="toolbar-group">
         <label className="inline-label">
