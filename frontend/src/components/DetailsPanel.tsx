@@ -3,7 +3,7 @@ import { isEffectivelyLocked } from '../graph/connectionRules';
 import { formatCoordinates } from '../graph/coordinateLayout';
 import { focusGroup, focusLocation } from '../graph/cyHolder';
 import { describeLock } from '../graph/elements';
-import { descendantGroupIds, groupPathLabel } from '../graph/groups';
+import { descendantGroupIds, groupPathLabel, hasGroupDefaults } from '../graph/groups';
 import {
   DIRECTION_OPTIONS,
   LINE_STYLE_OPTIONS,
@@ -33,11 +33,14 @@ const CONNECTION_FIELDS = [
 
 /** parentId is structural, so it commits through setGroupParent, but it still
  *  lives in the draft so Apply/Revert behave like every other field. */
-const GROUP_FIELDS = ['name', 'color', 'textColor', 'notes', 'parentId'] as const;
+const GROUP_FIELDS = [
+  'name', 'color', 'textColor', 'notes', 'parentId',
+  'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor', 'overrideLabels'
+] as const;
 
 const LOCATION_LABEL_FIELDS = [
   'name', 'color', 'notes', 'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor',
-  'defaultGroupId'
+  'defaultGroupId', 'overrideGroupings'
 ] as const;
 
 const CONNECTION_LABEL_FIELDS = [
@@ -110,6 +113,7 @@ function LocationInspector({ location }: { location: Location }) {
   const unassignLocationLabel = useGraphStore((s) => s.unassignLocationLabel);
   const applyLocationLabelStyling = useGraphStore((s) => s.applyLocationLabelStyling);
   const createLocationLabel = useGraphStore((s) => s.createLocationLabel);
+  const applyGroupStyling = useGraphStore((s) => s.applyGroupStyling);
 
   const save = useCallback(
     (id: string, patch: Partial<Location>) => updateLocation(id, patch),
@@ -204,9 +208,20 @@ function LocationInspector({ location }: { location: Location }) {
       </div>
 
       {location.groupId && groups[location.groupId] && (
-        <button className="link subtle" onClick={() => focusGroup(location.groupId!, selectGroup)}>
-          Inspect "{groupPathLabel(groups, location.groupId)}"
-        </button>
+        <div className="row actions">
+          <button className="link subtle" onClick={() => focusGroup(location.groupId!, selectGroup)}>
+            Inspect "{groupPathLabel(groups, location.groupId)}"
+          </button>
+          {hasGroupDefaults(groups[location.groupId]!) && (
+            <button
+              className="chip-btn"
+              title="Stamp this grouping's default styling onto this room"
+              onClick={() => void applyGroupStyling(location.id)}
+            >
+              Apply Styling
+            </button>
+          )}
+        </div>
       )}
 
       <h3>Labels</h3>
@@ -531,6 +546,7 @@ function GroupInspector({ group }: { group: Group }) {
   const selectLocation = useGraphStore((s) => s.selectLocation);
   const selectGroup = useGraphStore((s) => s.selectGroup);
   const runLayout = useGraphStore((s) => s.runLayout);
+  const applyStylingToAll = useGraphStore((s) => s.applyGroupStylingToAll);
 
   /* the parent is structural: it validates and re-layouts, so it goes its own way */
   const save = useCallback(
@@ -623,11 +639,81 @@ function GroupInspector({ group }: { group: Group }) {
         <textarea rows={5} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
       </label>
 
+      <h3>Default Styling (Opt-In)</h3>
+      <p className="muted small">
+        Stamped Onto A Room When It Is <em>Created</em> Inside This Grouping. Moving A Room In Never
+        Restyles It — Use Re-Apply Below. Anything Left Blank Is Never Applied.
+      </p>
+      <label>
+        Default Shape
+        <select
+          value={draft.defaultKind}
+          onChange={(e) => setDraft({ ...draft, defaultKind: e.target.value })}
+        >
+          <option value="">No Override</option>
+          {SHAPE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Default Size
+        <input
+          type="number"
+          min={0.1}
+          max={MAX_SIZE}
+          step={0.1}
+          value={draft.defaultSize ?? ''}
+          placeholder="No Override"
+          onChange={(e) =>
+            setDraft((d) => ({
+              ...d,
+              defaultSize: e.target.value === '' ? null : parseSize(e.target.value, d.defaultSize ?? 1)
+            }))
+          }
+        />
+      </label>
+      <div className="row">
+        <OptionalColorField
+          label="Default Box Color"
+          value={draft.defaultColor}
+          fallback={PALETTE.nodeFill}
+          onChange={(defaultColor) => setDraft({ ...draft, defaultColor })}
+        />
+        <OptionalColorField
+          label="Default Text Color"
+          value={draft.defaultTextColor}
+          fallback={PALETTE.nodeText}
+          onChange={(defaultTextColor) => setDraft({ ...draft, defaultTextColor })}
+        />
+      </div>
+      <InlineCheckField
+        label="Override Label Styling"
+        title="Off, any property one of the room's labels sets is left alone"
+        checked={draft.overrideLabels}
+        onChange={(overrideLabels) => setDraft({ ...draft, overrideLabels })}
+      />
+      <p className="muted small">
+        Off, A Property A Room's Label Already Sets Is Left Alone — Only The Properties No Label
+        Claims Are Stamped.
+      </p>
+
       <div className="row actions">
         <button disabled={!dirty} onClick={commit}>Apply</button>
         <button disabled={!dirty} onClick={revert}>Revert</button>
         <button onClick={runLayout}>Re-Layout</button>
       </div>
+
+      <button
+        disabled={!members.length}
+        onClick={async () => {
+          /* stamp the defaults the user can see, not the ones last saved */
+          await commit();
+          await applyStylingToAll(group.id);
+        }}
+      >
+        Re-Apply Styling To All {members.length} Rooms
+      </button>
 
       <h3>Rooms In This Grouping ({members.length})</h3>
       <ul className="hit-list dense">
@@ -790,6 +876,17 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
           onPick={(defaultGroupId) => setDraft((d) => ({ ...d, defaultGroupId }))}
         />
       </div>
+
+      <InlineCheckField
+        label="Override Grouping Styling"
+        title="Off, any property the room's grouping sets is left alone"
+        checked={draft.overrideGroupings}
+        onChange={(overrideGroupings) => setDraft({ ...draft, overrideGroupings })}
+      />
+      <p className="muted small">
+        Off, A Property The Room's Grouping Already Sets Is Left Alone. Other Labels Are Never Held
+        Back: The Last Label Applied Always Wins.
+      </p>
 
       <label>
         Notes

@@ -50,14 +50,18 @@ export interface Settings {
   /** Detached stub boxes (classic) or bare arrows into space. */
   ephemeralStyle: EphemeralStyle;
   /**
-   * Past the zoom where a size-1 room's name stops being legible, replace the
-   * map with its skeleton: rooms and names fade out, connection lines hold a
-   * constant on-screen thickness instead of thinning away, and each grouping
-   * shows its own name centred in its box. One transition drives all three.
+   * Draw connection lines in the zoomed-out skeleton, at a constant on-screen
+   * thickness. Off, only the grouping boxes and their titles remain — the
+   * cheapest view of a very large map there is.
    */
-  skeletonView: boolean;
+  skeletonLines: boolean;
   /** Rendered thickness, in pixels, of a weight-1 connection inside the skeleton. */
   skeletonLineWidth: number;
+  /**
+   * Allow zooming out past the point where the skeleton takes over. Off, that
+   * point *is* the zoom floor, so the detailed view is the only view.
+   */
+  allowSkeletonZoom: boolean;
   /** Stop the trip planner after a while instead of searching exhaustively. */
   limitSearchTime: boolean;
   /** Whole seconds. */
@@ -72,12 +76,13 @@ export const DEFAULT_SETTINGS: Settings = {
   constantSize: false,
   sizeCompensation: 0.75,
   groupDrag: 'selected',
-  /* rooms are small and rarely in the way, so they keep grabbing by default */
-  locationDrag: 'always',
+  /* a room is easy to nudge by accident while panning over it, so — like a
+     grouping — it has to be picked up before it will move */
+  locationDrag: 'selected',
   ephemeralStyle: 'nodes',
-  /* without it, a far zoom-out is just hairlines on an empty canvas */
-  skeletonView: true,
+  skeletonLines: true,
   skeletonLineWidth: 1.5,
+  allowSkeletonZoom: true,
   limitSearchTime: true,
   searchTimeLimitSeconds: 10
 };
@@ -96,11 +101,13 @@ const LEGACY_KEYS = ['mapgraph.settings.v5', 'mapgraph.settings.v4'];
 const clamp = (v: number, lo: number, hi: number) =>
   Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo;
 
-/** Fields from pre-v6 schemas, read only to migrate an existing install. */
+/** Fields from older schemas, read only to migrate an existing install. */
 interface LegacySettings {
   sizing?: string; // v5
   hideSmallLabels?: boolean;
   labelCulling?: string;
+  /** pre-`skeletonLines`: "is there a skeleton at all" */
+  skeletonView?: boolean;
 }
 
 export function normaliseSettings(
@@ -138,12 +145,16 @@ export function normaliseSettings(
     ephemeralStyle: EPHEMERAL_STYLES.includes(s?.ephemeralStyle as EphemeralStyle)
       ? (s!.ephemeralStyle as EphemeralStyle)
       : DEFAULT_SETTINGS.ephemeralStyle,
-    skeletonView: s?.skeletonView ?? DEFAULT_SETTINGS.skeletonView,
+    /* the skeleton is no longer optional; an install that had it switched off
+       wanted the far-out view uncluttered, which is now what dropping the
+       connection lines does */
+    skeletonLines: s?.skeletonLines ?? s?.skeletonView ?? DEFAULT_SETTINGS.skeletonLines,
     skeletonLineWidth: clamp(
       Number(s?.skeletonLineWidth ?? DEFAULT_SETTINGS.skeletonLineWidth),
       SKELETON_LINE_WIDTH_RANGE[0],
       SKELETON_LINE_WIDTH_RANGE[1]
     ),
+    allowSkeletonZoom: s?.allowSkeletonZoom ?? DEFAULT_SETTINGS.allowSkeletonZoom,
     limitSearchTime: s?.limitSearchTime ?? DEFAULT_SETTINGS.limitSearchTime,
     searchTimeLimitSeconds: Math.round(
       clamp(Number(s?.searchTimeLimitSeconds ?? DEFAULT_SETTINGS.searchTimeLimitSeconds), 1, 3600)

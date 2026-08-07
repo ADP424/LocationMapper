@@ -63,10 +63,10 @@ export function useLayoutRunner(handle: CanvasHandle | null, layout: LayoutName,
     );
 
     const finish = (padding: number, persist = true) => {
-      scaler.reposition();
-      handle.restack();
-      handle.fitAndRescale(padding);
-      cy.forceRender();
+      /* one reset, in one place: scaler index, stacking + grouping boxes, the
+         extent model, the zoom floor, the fit, and the view scale — in that
+         order, which is the whole point of `sync()` existing */
+      handle.sync({ fit: padding });
       if (!persist) return;
       const snap = snapshot(cy);
       void useGraphStore.getState().persistLayoutPositions(snap.positions, snap.portalOffsets);

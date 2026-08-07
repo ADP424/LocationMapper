@@ -135,6 +135,13 @@ export async function fetchLocationsByLabel(labelId: string): Promise<Location[]
   return rows.map(mapLocation);
 }
 
+export async function fetchLocationsByGroup(groupId: string): Promise<Location[]> {
+  const { rows } = await pool.query(`${LOCATION_SQL} WHERE l.group_id = $1 ORDER BY l.created_at`, [
+    groupId
+  ]);
+  return rows.map(mapLocation);
+}
+
 export async function fetchConnection(id: string, client?: PoolClient): Promise<Connection> {
   const { rows } = await runner(client).query(`${CONNECTION_SQL} WHERE c.id = $1`, [id]);
   if (!rows.length) throw notFound('connection');

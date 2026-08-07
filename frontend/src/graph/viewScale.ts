@@ -95,20 +95,25 @@ export const EMPTY_BUDGET: ViewBudget = { labelCeiling: 0, labelled: 0, budget: 
 
 export type ScaleLimit = 'none' | 'density' | 'skeleton' | 'ceiling' | 'texture';
 
-/** A location name below this many rendered pixels is not worth drawing —
- *  the skeleton's readability trigger, checked against a *size-1* room so
- *  Base Size and compensation alone decide it, never an individual room's
- *  own size scalar. */
-export const NAME_MIN_PX = 6;
-/** Leaving the skeleton costs 15% more zoom than entering it — matches the
- *  density hysteresis below, so neither rule can strobe on its own. */
-const SKELETON_HYSTERESIS = 1.15;
+/**
+ * The one constant that places the boundary between the detailed view and the
+ * zoomed-out skeleton: the rendered size, in pixels, of a *size-1* room's name
+ * at the instant the two views swap. There is deliberately no hysteresis — the
+ * boundary is a single zoom, crossed at the same place in both directions.
+ *
+ * It is `FONT_MIN.location` on purpose. That is the size at which Cytoscape
+ * culls a room's name anyway, so the names, the room shapes and the grouping
+ * titles all change over together. Raising it flips sooner (while further in);
+ * lowering it below `FONT_MIN.location` would re-open a band of boxes with no
+ * names in it.
+ */
+export const SKELETON_NAME_PX = FONT_MIN.location;
 /** A weight-1 connection's model width (see `weightToWidth(1)` in model.ts). */
 const REFERENCE_LINE_WIDTH = 3.5;
-
-/** How much of a grouping's own box its centred skeleton title may fill. */
-export const GROUP_NAME_FIT_W = 0.8;
-export const GROUP_NAME_FIT_H = 0.55;
+/** The skeleton's centred grouping title is fitted to the grouping's own box,
+ *  leaving exactly this fraction of the box as breathing room on each side —
+ *  so the space the title gets is precisely as long and as tall as it needs. */
+export const GROUP_NAME_INSET = 0.06;
 export const GROUP_NAME_MIN_PX = 11;
 export const GROUP_NAME_MAX_PX = 64;
 
@@ -123,6 +128,8 @@ export interface ViewScale {
    *  grouping titles take over as the map's landmarks. One flag drives all
    *  of it, so it cannot partially engage. */
   skeleton: boolean;
+  /** Connection lines are drawn. False only inside a line-less skeleton. */
+  lines: boolean;
   /** Multiplies every connection's line width. Exactly 1 outside the skeleton. */
   line: number;
   /** What pulled the factor back, for the status bar. */
@@ -135,13 +142,14 @@ export const IDENTITY_SCALE: ViewScale = {
   text: 1,
   labels: true,
   skeleton: false,
+  lines: true,
   line: 1,
   limit: 'none',
   factor: 1
 };
 
 export const scaleKey = (s: ViewScale) =>
-  `${s.text}|${s.labels ? 1 : 0}|${s.skeleton ? 1 : 0}|${s.line}`;
+  `${s.text}|${s.labels ? 1 : 0}|${s.skeleton ? 1 : 0}|${s.lines ? 1 : 0}|${s.line}`;
 
 /** The compensation factor on names. Monotone in zoom, which `fitZoom` needs. */
 export function textFactorAt(zoom: number, settings: Settings): number {
@@ -149,6 +157,39 @@ export function textFactorAt(zoom: number, settings: Settings): number {
   const s = clamp(settings.sizeCompensation, 0, 1);
   if (!s) return 1;
   return Math.min(MAX_COMPENSATION, Math.pow(clamp(zoom, MIN_ZOOM, MAX_ZOOM), -s));
+}
+
+/**
+ * True exactly when the zoomed-out skeleton owns the canvas. Pure in `(zoom,
+ * settings)`: the same zoom always gives the same answer, in both directions.
+ */
+export function skeletonAt(zoom: number, settings: Settings): boolean {
+  const z = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+  return NAME_FONT * settings.baseScale * textFactorAt(z, settings) * z < SKELETON_NAME_PX;
+}
+
+/**
+ * The exact zoom at which the two views swap — the smallest zoom at which the
+ * *detailed* view is drawn, and therefore the zoom floor when the user has
+ * forbidden the skeleton outright.
+ *
+ * `g(z) = NAME_FONT · baseScale · f(z) · z` is non-decreasing in z (`f`
+ * saturates at `MAX_COMPENSATION`, so even at strength 1 the product keeps
+ * growing below the cap), so the boundary is found by bisecting the very
+ * predicate the renderer uses. There is no closed form: `f` is a clamped power.
+ */
+export function skeletonZoom(settings: Settings): number {
+  if (!skeletonAt(MIN_ZOOM, settings)) return MIN_ZOOM; // never skeletal
+  if (skeletonAt(MAX_ZOOM, settings)) return MAX_ZOOM; // always skeletal
+
+  let lo = MIN_ZOOM; // skeletal
+  let hi = MAX_ZOOM; // detailed
+  for (let i = 0; i < 48; i++) {
+    const mid = Math.sqrt(lo * hi); // geometric: the range spans five decades
+    if (skeletonAt(mid, settings)) lo = mid;
+    else hi = mid;
+  }
+  return hi;
 }
 
 /**
@@ -169,12 +210,7 @@ function easedStrength(settings: Settings, b: ViewBudget) {
   return { s: requested * (Math.log(hard / drawn) / Math.log(4)), eased: true };
 }
 
-export function solveViewScale(
-  zoom: number,
-  settings: Settings,
-  b: ViewBudget,
-  previous: ViewScale = IDENTITY_SCALE
-): ViewScale {
+export function solveViewScale(zoom: number, settings: Settings, b: ViewBudget): ViewScale {
   const z = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
   const { s, eased } = easedStrength(settings, b);
   let limit: ScaleLimit = eased ? 'density' : 'none';
@@ -198,31 +234,44 @@ export function solveViewScale(
   }
   const text = f * ratio;
 
-  /* 15% hysteresis, or a map sitting on the threshold would strobe */
-  const labels = previous.labels ? b.labelled <= b.budget * 1.15 : b.labelled <= b.budget * 0.85;
-  if (!labels && limit === 'none') limit = 'density';
+  /* ── the skeleton transition ────────────────────────────────────────────
+     One boolean drives names hiding, boxes fading, lines thickening and the
+     grouping titles taking over, so the three can never drift apart by a
+     frame. It is a pure function of the zoom, so the flip lands on exactly
+     the same zoom whether the user is zooming in or out, and SKELETON_NAME_PX
+     is the single knob that moves it. */
+  const skeleton = skeletonAt(z, settings);
 
-  /* ── the skeleton transition ──────────────────────────────────────────
-     One boolean drives everything below it: names hiding, boxes fading and
-     lines thickening all read this same flag out of the same solved scale,
-     so they land in the same batched write and cannot drift apart by a
-     frame. It fires on either of two independent, hysteretic conditions:
-     a size-1 room's name has become too small to read, or there are simply
-     too many names to draw at all (the existing density rule). */
-  const refFont = NAME_FONT * settings.baseScale * text * z;
-  const tooSmall = previous.skeleton ? refFont < NAME_MIN_PX * SKELETON_HYSTERESIS : refFont < NAME_MIN_PX;
-  const skeleton = settings.skeletonView && (tooSmall || !labels);
+  /* ── names ────────────────────────────────────────────────────────────────
+     Names are drawn exactly when the detailed view is. The skeleton *is* the
+     no-names regime; the density cull that used to sit here was a second,
+     invisible transition point — hysteretic, and keyed to a draw budget that
+     collapses 10% per slow frame (which is what zooming out produces) and
+     recovers at 2%. That is why the names stayed hidden octaves after the room
+     shapes came back.
 
-  /* a weight-1 line renders at exactly `skeletonLineWidth`; every other
-     weight keeps its ratio to it; nothing already thicker than the floor is
-     ever made thinner, so the transition never looks like a glitch */
-  const line = skeleton
-    ? Math.max(1, rungUp(settings.skeletonLineWidth / (REFERENCE_LINE_WIDTH * z)))
-    : 1;
+     Per-element culling is Cytoscape's `min-zoomed-font-size`, seeded from
+     `FONT_MIN` — and for a size-1 room that is the very same 6 px the skeleton
+     threshold uses, so the two agree by construction: the instant the rooms
+     reappear, their names are exactly at their own cull threshold and bigger
+     rooms' names are already past it. Density pressure is answered by easing
+     the compensation strength (`easedStrength`), which is precisely what hands
+     that per-element culling back when it is needed. */
+  const labels = !skeleton;
 
-  /* the skeleton is a strictly more specific state than the plain density
-     cull that can itself trigger it — it should always win the status chip */
+  /* The skeleton may be asked to drop the lines as well, leaving only the
+     groupings: on a very large map that is the difference between drawing
+     every connection and drawing a few dozen boxes. */
+  const lines = !skeleton || settings.skeletonLines;
+
+  /* a weight-1 line renders at exactly `skeletonLineWidth`; every other weight
+     keeps its ratio to it; nothing already thicker is ever made thinner */
+  const line =
+    skeleton && lines
+      ? Math.max(1, rungUp(settings.skeletonLineWidth / (REFERENCE_LINE_WIDTH * z)))
+      : 1;
+
   if (skeleton) limit = 'skeleton';
 
-  return { text, labels: labels && !skeleton, skeleton, line, limit, factor: f };
+  return { text, labels, skeleton, lines, line, limit, factor: f };
 }

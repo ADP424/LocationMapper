@@ -82,6 +82,11 @@ export function groupPathLabel(groups: Record<string, Group>, id: string): strin
   return parts.join(' › ');
 }
 
+/** Does this grouping claim any room styling at all? */
+export function hasGroupDefaults(g: Group): boolean {
+  return !!(g.defaultKind || g.defaultColor || g.defaultTextColor) || g.defaultSize !== null;
+}
+
 /** Groups that should be drawn: those with rooms, plus all of their ancestors. */
 export function renderableGroupIds(
   groups: Group[],

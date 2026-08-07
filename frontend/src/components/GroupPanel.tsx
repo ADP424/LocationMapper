@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { focusGroup } from '../graph/cyHolder';
-import { buildGroupTree, flattenGroupTree } from '../graph/groups';
+import { buildGroupTree, flattenGroupTree, hasGroupDefaults } from '../graph/groups';
 import { useGraphStore } from '../state/store';
 import { cssColor, readableOn } from '../utils/colors';
 
@@ -9,6 +9,9 @@ export default function GroupPanel() {
   const locations = useGraphStore((s) => s.locations);
   const groupLayers = useGraphStore((s) => s.groupLayers);
   const selectGroup = useGraphStore((s) => s.selectGroup);
+  const createGroup = useGraphStore((s) => s.createGroup);
+  const mapId = useGraphStore((s) => s.mapId);
+  const [name, setName] = useState('');
   /* the panel's real background, not a hard-coded hex — a future light theme
      needs no code change here, only the CSS variable's value */
   const panelBg = useMemo(() => cssColor('--bg-2', '#111722'), []);
@@ -27,6 +30,26 @@ export default function GroupPanel() {
   return (
     <section className="panel">
       <h2>Groupings</h2>
+      <form
+        className="row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const n = name.trim();
+          if (!n) return;
+          void createGroup(n);
+          setName('');
+        }}
+      >
+        <input
+          value={name}
+          disabled={!mapId}
+          placeholder="New Grouping…"
+          onChange={(e) => setName(e.target.value)}
+        />
+        <button type="submit" disabled={!mapId}>
+          Add
+        </button>
+      </form>
       <ul className="hit-list">
         {rows.map(({ group, depth, count }) => {
           const layer = groupLayers[group.id];
@@ -45,6 +68,7 @@ export default function GroupPanel() {
                   {layer
                     ? ` · Layer ${layer.order}/${layer.total}${layer.note ? ` (${layer.note})` : ''}`
                     : ''}
+                  {hasGroupDefaults(group) ? ' · Styles Its Rooms' : ''}
                   {count === 0 ? ' · Not Drawn Until It Has A Room' : ''}
                 </span>
               </button>
@@ -53,7 +77,8 @@ export default function GroupPanel() {
         })}
         {rows.length === 0 && (
           <li className="muted small">
-            None Yet — Right-Click A Room And Choose "Create Grouping From This Room".
+            None Yet — Add One Above, Or Right-Click A Room And Choose "Create Grouping From This
+            Room".
           </li>
         )}
       </ul>

@@ -33,6 +33,11 @@ export const mapGroup = (r: any): Group => ({
   color: r.color,
   textColor: r.text_color,
   notes: r.notes,
+  defaultKind: r.default_kind ?? '',
+  defaultSize: num(r.default_size),
+  defaultColor: r.default_color ?? '',
+  defaultTextColor: r.default_text_color ?? '',
+  overrideLabels: r.override_labels ?? false,
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)
 });
@@ -95,6 +100,7 @@ export const mapLocationLabel = (r: any): LocationLabel => ({
   defaultColor: r.default_color,
   defaultTextColor: r.default_text_color,
   defaultGroupId: r.default_group_id ?? null,
+  overrideGroupings: r.override_groupings ?? false,
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)
 });

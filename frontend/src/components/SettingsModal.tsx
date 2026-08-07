@@ -137,7 +137,7 @@ export default function SettingsModal() {
         <section className="modal-section">
           <h3>
             Zoom-Independent Sizing
-            <Help text="Keeps names the same size on screen while you zoom — boxes always scale with the zoom. Names that would pile up too densely are hidden automatically." />
+            <Help text="Keeps names the same size on screen while you zoom — boxes always scale with the zoom. When too many names would be on screen at once, the effect eases back toward normal scaling so the small ones can be culled again." />
           </h3>
           <div className="slider-row">
             <input
@@ -170,7 +170,7 @@ export default function SettingsModal() {
         <section className="modal-section">
           <h3>
             Zoomed-Out Skeleton
-            <Help text="Past the zoom where a size-1 room's name stops being legible, the map flips to its skeleton: rooms and names fade out, grouping names appear centred in their boxes, and connection lines hold a constant on-screen thickness so the map's broad shape and direction stay visible. The flip happens at one instant for all three. Turn it off to let everything fade away with nothing to replace it." />
+            <Help text="Past the zoom where a size-1 room's name stops being legible, the map flips to its skeleton: rooms and names fade out, and each grouping shows its name centred in its box. The flip happens at exactly the same zoom whether you are zooming in or out. Connection lines can hold a constant on-screen thickness there — or be dropped entirely, leaving only the groupings, which is the cheapest way to look at a very large map." />
           </h3>
           <div className="slider-row">
             <input
@@ -178,7 +178,7 @@ export default function SettingsModal() {
               min={SKELETON_LINE_WIDTH_RANGE[0]}
               max={SKELETON_LINE_WIDTH_RANGE[1]}
               step={0.25}
-              disabled={!settings.skeletonView}
+              disabled={!settings.skeletonLines}
               value={settings.skeletonLineWidth}
               onChange={(e) => setSettings({ skeletonLineWidth: Number(e.target.value) })}
             />
@@ -188,23 +188,37 @@ export default function SettingsModal() {
               min={SKELETON_LINE_WIDTH_RANGE[0]}
               max={SKELETON_LINE_WIDTH_RANGE[1]}
               step={0.25}
-              disabled={!settings.skeletonView}
+              disabled={!settings.skeletonLines}
               value={settings.skeletonLineWidth}
               onChange={(e) => setSettings({ skeletonLineWidth: Number(e.target.value) })}
             />
             <InlineCheckField
-              label="Enabled"
-              checked={settings.skeletonView}
-              onChange={(v) => setSettings({ skeletonView: v })}
+              label="Connection Lines"
+              checked={settings.skeletonLines}
+              onChange={(v) => setSettings({ skeletonLines: v })}
             />
           </div>
-          <p className="muted small">Line Thickness In Pixels — A Weight-1 Connection Is Drawn At Exactly This.</p>
+          <p className="muted small">
+            Line Thickness In Pixels — A Weight-1 Connection Is Drawn At Exactly This. Turn The Lines
+            Off To Leave Only The Groupings.
+          </p>
+          <div className="slider-row">
+            <InlineCheckField
+              label="Allow Zooming Out Into It"
+              title="Off, the zoom stops at the transition point, so the skeleton is never reached"
+              checked={settings.allowSkeletonZoom}
+              onChange={(v) => setSettings({ allowSkeletonZoom: v })}
+            />
+            <span className="muted small">
+              Off, The Zoom Stops At The Transition Point — Fit Will Not Show A Map Larger Than That.
+            </span>
+          </div>
         </section>
 
         <section className="modal-section">
           <h3>
             Ephemeral Connections
-            <Help text="Detached stubs draw a labelled box near each room. Arrows draw only a short line into space, with the description on the line — less clutter on dense maps. Either way the ends stay draggable and keep their saved offsets, and the connection's name rides the line in italics." />
+            <Help text="Detached stubs draw a labelled box near each room. Arrows draw only a short line into space, ending in whichever arrowhead the connection designates for that end, with the description alongside the line — less clutter on dense maps. Either way the ends stay draggable and keep their saved offsets, and the connection's name rides the line in italics." />
           </h3>
           <label>
             Display As

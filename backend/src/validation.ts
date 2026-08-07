@@ -18,7 +18,12 @@ export const groupCreate = z.object({
   textColor: z.string().max(40).optional(),
   notes: z.string().max(100_000).optional(),
   parentId: uuid.nullable().optional(),
-  locationIds: z.array(uuid).max(10_000).optional()
+  locationIds: z.array(uuid).max(10_000).optional(),
+  defaultKind: z.string().max(60).optional(),
+  defaultSize: z.number().finite().positive().max(25).nullable().optional(),
+  defaultColor: z.string().max(40).optional(),
+  defaultTextColor: z.string().max(40).optional(),
+  overrideLabels: z.boolean().optional()
 });
 
 export const groupUpdate = groupCreate.omit({ locationIds: true });
@@ -84,7 +89,8 @@ export const locationLabelCreate = z.object({
   defaultSize: z.number().finite().positive().max(25).nullable().optional(),
   defaultColor: z.string().max(40).optional(),
   defaultTextColor: z.string().max(40).optional(),
-  defaultGroupId: uuid.nullable().optional()
+  defaultGroupId: uuid.nullable().optional(),
+  overrideGroupings: z.boolean().optional()
 });
 
 export const locationLabelUpdate = locationLabelCreate;
@@ -144,7 +150,12 @@ export const graphImport = z.object({
         name: z.string().max(200).optional(),
         color: z.string().max(40).optional(),
         textColor: z.string().max(40).optional(),
-        notes: z.string().max(100_000).optional()
+        notes: z.string().max(100_000).optional(),
+        defaultKind: z.string().max(60).optional(),
+        defaultSize: z.number().finite().positive().max(25).nullable().optional(),
+        defaultColor: z.string().max(40).optional(),
+        defaultTextColor: z.string().max(40).optional(),
+        overrideLabels: z.boolean().optional()
       })
     )
     .max(20_000)

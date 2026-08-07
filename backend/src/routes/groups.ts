@@ -2,11 +2,32 @@ import { Router } from 'express';
 import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
 import { mapGroup } from '../mappers';
-import { assertGroupOnMap, assertLocationsOnMap, assertMapExists, mapIdOf } from '../repo';
+import {
+  assertGroupOnMap,
+  assertLocationsOnMap,
+  assertMapExists,
+  fetchLocationsByGroup,
+  mapIdOf
+} from '../repo';
 import { insertSql, updateSql } from '../sql';
+import { applyGroupStyling } from '../styling';
 import { groupCreate, groupUpdate, uuid } from '../validation';
 
 export const groupsRouter = Router();
+
+/** Request body -> column names. */
+const columns = (b: ReturnType<typeof groupUpdate.parse>) => ({
+  name: b.name,
+  color: b.color,
+  text_color: b.textColor,
+  notes: b.notes,
+  parent_id: b.parentId,
+  default_kind: b.defaultKind,
+  default_size: b.defaultSize,
+  default_color: b.defaultColor,
+  default_text_color: b.defaultTextColor,
+  override_labels: b.overrideLabels
+});
 
 /** Reject `child -> … -> parent -> child` loops before they can be written. */
 async function assertNoCycle(groupId: string, parentId: string) {
@@ -36,11 +57,8 @@ groupsRouter.post(
     const group = await withTransaction(async (client) => {
       const stmt = insertSql('groups', {
         map_id: mapId,
-        parent_id: b.parentId,
-        name: b.name ?? 'New Grouping',
-        color: b.color,
-        text_color: b.textColor,
-        notes: b.notes
+        ...columns(b),
+        name: b.name ?? 'New Grouping'
       });
       const { rows } = await client.query(stmt.text, stmt.values);
       if (b.locationIds?.length) {
@@ -77,18 +95,7 @@ groupsRouter.patch(
       await assertNoCycle(id, b.parentId);
     }
 
-    const stmt = updateSql(
-      'groups',
-      id,
-      {
-        name: b.name,
-        color: b.color,
-        text_color: b.textColor,
-        notes: b.notes,
-        parent_id: b.parentId
-      },
-      '*'
-    );
+    const stmt = updateSql('groups', id, columns(b), '*');
     const { rows } = stmt
       ? await query(stmt.text, stmt.values)
       : await query(`SELECT * FROM groups WHERE id = $1`, [id]);
@@ -115,5 +122,19 @@ groupsRouter.post(
       uuid.parse(req.params.id)
     ]);
     res.json({ released: rowCount ?? 0 });
+  })
+);
+
+/** Re-stamp this grouping's defaults onto every room inside it. */
+groupsRouter.post(
+  '/groups/:id/apply',
+  ah(async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    await mapIdOf('groups', id); // 404s for an unknown grouping
+    await withTransaction(async (client) => {
+      const { rows } = await client.query(`SELECT id FROM locations WHERE group_id = $1`, [id]);
+      for (const r of rows) await applyGroupStyling(client, r.id, id);
+    });
+    res.json({ locations: await fetchLocationsByGroup(id) });
   })
 );

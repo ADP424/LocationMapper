@@ -81,7 +81,12 @@ mapsRouter.get(
         name: g.name,
         color: g.color,
         textColor: g.textColor,
-        notes: g.notes
+        notes: g.notes,
+        defaultKind: g.defaultKind,
+        defaultSize: g.defaultSize,
+        defaultColor: g.defaultColor,
+        defaultTextColor: g.defaultTextColor,
+        overrideLabels: g.overrideLabels
       })),
       locationLabels: graph.locationLabels.map((l) => ({
         key: l.id,
@@ -92,7 +97,8 @@ mapsRouter.get(
         defaultSize: l.defaultSize,
         defaultColor: l.defaultColor,
         defaultTextColor: l.defaultTextColor,
-        defaultGroupKey: l.defaultGroupId
+        defaultGroupKey: l.defaultGroupId,
+        overrideGroupings: l.overrideGroupings
       })),
       connectionLabels: graph.connectionLabels.map((l) => ({
         key: l.id,
@@ -252,7 +258,12 @@ mapsRouter.post(
             name: g.name,
             color: g.color,
             text_color: g.textColor,
-            notes: g.notes
+            notes: g.notes,
+            default_kind: g.defaultKind,
+            default_size: g.defaultSize,
+            default_color: g.defaultColor,
+            default_text_color: g.defaultTextColor,
+            override_labels: g.overrideLabels
           })
         );
       }
@@ -282,7 +293,8 @@ mapsRouter.post(
             default_size: l.defaultSize,
             default_color: l.defaultColor,
             default_text_color: l.defaultTextColor,
-            default_group_id: l.defaultGroupKey ? groupIds.get(l.defaultGroupKey) ?? null : null
+            default_group_id: l.defaultGroupKey ? groupIds.get(l.defaultGroupKey) ?? null : null,
+            override_groupings: l.overrideGroupings
           })
         );
       }

@@ -145,12 +145,15 @@ interface Store {
   deleteLocations: (ids: string[]) => Promise<void>;
   toggleVisited: (id: string) => Promise<void>;
 
+  createGroup: (name: string) => Promise<void>;
   createGroupFrom: (locationIds: string[]) => Promise<void>;
   updateGroup: (id: string, patch: Partial<Group>) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
   ungroupAll: (id: string) => Promise<void>;
   setLocationGroup: (locationId: string, groupId: string | null) => Promise<void>;
   setGroupParent: (groupId: string, parentId: string | null) => Promise<void>;
+  applyGroupStylingToAll: (groupId: string) => Promise<void>;
+  applyGroupStyling: (locationId: string) => Promise<void>;
 
   createLocationLabel: (name: string) => Promise<void>;
   updateLocationLabel: (id: string, patch: Partial<LocationLabel>) => Promise<void>;
@@ -720,6 +723,20 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     /* ------------------------------------------------------- groupings */
+    createGroup: async (name) => {
+      const { mapId } = get();
+      if (!mapId) return;
+      const created = await guardScoped(() => api.createGroup(mapId, { name }));
+      if (!created) return;
+      set((s) => ({
+        groups: { ...s.groups, [created.id]: created },
+        selection: { type: 'group', id: created.id },
+        multiSelect: []
+      }));
+      /* an empty grouping is not drawn, so there is nothing to re-layout */
+      flash('Grouping Created — It Appears On The Map Once A Room Joins It');
+    },
+
     createGroupFrom: async (locationIds) => {
       const { mapId } = get();
       if (!mapId || !locationIds.length) return;
@@ -801,6 +818,28 @@ export const useGraphStore = create<Store>()((set, get) => {
       const updated = await guardScoped(() => api.updateGroup(groupId, { parentId }));
       if (!updated) return;
       set((s) => ({ groups: { ...s.groups, [groupId]: updated }, contextMenu: null }));
+      afterStructureChange();
+    },
+
+    applyGroupStylingToAll: async (groupId) => {
+      const result = await guardScoped(() => api.applyGroupStylingToAll(groupId));
+      if (!result) return;
+      set((s) => {
+        const locations = { ...s.locations };
+        for (const l of result.locations) locations[l.id] = l;
+        return { locations };
+      });
+      /* a grouping's defaults can never move a room between groupings, so the
+         arrangement is untouched — only the rooms' own geometry */
+      flash(`Styling Applied To ${result.locations.length} Rooms`);
+      afterStructureChange();
+    },
+
+    applyGroupStyling: async (locationId) => {
+      const updated = await guardScoped(() => api.applyGroupStyling(locationId));
+      if (!updated) return;
+      set((s) => ({ locations: { ...s.locations, [locationId]: updated } }));
+      flash('Grouping Styling Applied');
       afterStructureChange();
     },
 

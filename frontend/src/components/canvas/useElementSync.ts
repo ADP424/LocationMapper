@@ -2,22 +2,30 @@ import type { ElementDefinition } from 'cytoscape';
 import { useEffect, useRef } from 'react';
 import { buildConnectionIndex } from '../../graph/highlight';
 import { reconcile } from '../../graph/reconcile';
-import { refreshMinZoom } from '../../graph/zoomBounds';
+import { FIT_PADDING } from '../../graph/zoomBounds';
 import type { CanvasHandle } from './handle';
 
 /**
- * Reconciles the desired element set into Cytoscape, then re-derives
- * everything that depends purely on *geometry* (the grouping stack, the
- * ViewScaler's buckets, the zoom floor). Highlighting is handled by a
- * separate hook (`useHighlight`) so a selection change never pays for any of
- * this — it only ever needs to re-run classes.
+ * Reconciles the desired element set into Cytoscape, and — only when the
+ * reconcile actually moved, added, removed or resized something — hands the
+ * canvas to `sync()`, which owns every geometry-derived bound.
+ *
+ * `buildElements` rebuilds its array on every store change, so this effect runs
+ * on every click. It used to re-index the whole graph, rebuild both spatial
+ * grids and re-solve the zoom floor each time — which is why a stale zoom floor
+ * silently repaired itself the moment you selected something.
  */
-export function useElementSync(handle: CanvasHandle | null, elements: ElementDefinition[], mapId: string | null) {
+export function useElementSync(
+  handle: CanvasHandle | null,
+  elements: ElementDefinition[],
+  mapId: string | null
+) {
   const lastMapRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!handle) return;
     const { cy, scaler } = handle;
+
     const fullReset = lastMapRef.current !== mapId;
     lastMapRef.current = mapId;
 
@@ -28,29 +36,18 @@ export function useElementSync(handle: CanvasHandle | null, elements: ElementDef
     };
 
     const result = reconcile(cy, elements, fullReset, centre);
-    if (fullReset || result.structural) {
-      scaler.build();
-    } else {
-      if (result.dirty.length) scaler.markDirty(result.dirty);
-      scaler.reposition();
-    }
-    /* groupings are drawn bottom-most; their order follows the rooms */
-    handle.restack();
-    /* …and a bigger (or smaller) map can be pulled back further (or less) */
-    refreshMinZoom(cy, handle.settingsRef.current);
-    /* a precise, once-per-reconcile signal — unlike `style`, which fires per element */
-    cy.emit('mapgraphgeometry');
-    handle.connIndexRef.current = buildConnectionIndex(cy);
-    if (result.structural) cy.forceRender();
 
-    if (fullReset) {
-      requestAnimationFrame(() => {
-        if (handle.cy !== cy) return;
-        cy.resize();
-        if (cy.nodes().length) handle.fitAndRescale(60);
-        cy.forceRender();
-      });
-    }
+    /* the index maps connectionId -> elements: only a structural change moves it */
+    if (fullReset || result.structural) handle.connIndexRef.current = buildConnectionIndex(cy);
+    if (result.dirty.length) scaler.markDirty(result.dirty);
+
+    /* a selection, a highlight or a notes edit changes no geometry at all */
+    if (!fullReset && !result.structural && !result.moved && !result.dirty.length) return;
+
+    handle.sync({
+      rebuild: fullReset || result.structural,
+      fit: fullReset ? FIT_PADDING : undefined
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handle, elements, mapId]);
 }

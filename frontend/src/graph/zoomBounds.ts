@@ -1,7 +1,7 @@
 import type { Core } from 'cytoscape';
 import type { Settings } from '../state/settings';
 import { drawnExtentAt, extentModel, fitZoom } from './extent';
-import { MAX_ZOOM, MIN_ZOOM, textFactorAt } from './viewScale';
+import { MAX_ZOOM, MIN_ZOOM, skeletonZoom, textFactorAt } from './viewScale';
 
 export { MAX_ZOOM, MIN_ZOOM };
 export const DEFAULT_MIN_ZOOM = 0.05;
@@ -11,9 +11,6 @@ export const FIT_PADDING = 60;
 const FIT_SLACK = 0.75;
 /** …and wander at most this many viewports past the content. */
 const PAN_SLACK = 1;
-const THROTTLE_MS = 150;
-
-const lastRun = new WeakMap<Core, number>();
 
 function solve(cy: Core, settings: Settings, padding: number) {
   const model = extentModel(cy, settings);
@@ -26,33 +23,58 @@ function solve(cy: Core, settings: Settings, padding: number) {
 }
 
 /**
- * Let the user zoom out until the whole map is on screen, however far apart the
- * rooms are — and however much the compensation is holding the boxes open. The
- * floor is only ever *lowered* below `DEFAULT_MIN_ZOOM`.
+ * The lowest zoom the user may reach.
+ *
+ * Normally that is "the whole map on screen, plus a little slack". With
+ * `allowSkeletonZoom` off it is the skeleton boundary instead: the far-out view
+ * is the one that puts *every* element on screen at once, so refusing to enter
+ * it is the strongest performance guard the app has. It belongs here, which is
+ * the single place the floor is ever set, rather than in the wheel handler —
+ * so a re-layout, a Fit, a map open and a settings change all honour it without
+ * knowing it exists.
  */
-export function refreshMinZoom(cy: Core, settings: Settings, force = false) {
-  const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  if (!force && now - (lastRun.get(cy) ?? -Infinity) < THROTTLE_MS) return;
-  lastRun.set(cy, now);
-
+function zoomFloor(cy: Core, settings: Settings): number {
   const solved = solve(cy, settings, FIT_PADDING);
-  const min = solved
+  const fit = solved
     ? Math.max(MIN_ZOOM, Math.min(DEFAULT_MIN_ZOOM, solved.zoom * FIT_SLACK))
     : DEFAULT_MIN_ZOOM;
 
+  if (settings.allowSkeletonZoom) return fit;
+  return Math.min(MAX_ZOOM, Math.max(fit, skeletonZoom(settings)));
+}
+
+/** Only ever *lowered* below `DEFAULT_MIN_ZOOM` — unless the skeleton is
+ *  forbidden, in which case the floor is raised to its boundary.
+ *
+ * Called from exactly one place — `syncGeometry` — which is why there is no
+ * throttle here any more: it used to run on every reconcile, i.e. every click.
+ */
+export function refreshMinZoom(cy: Core, settings: Settings) {
+  const min = zoomFloor(cy, settings);
   if (Math.abs(min - cy.minZoom()) > min * 0.01) cy.minZoom(min);
+}
+
+/** `cy.minZoom()` declares a bound; it does not enforce it. A layout that shrank
+ *  the map leaves the viewport standing below the new floor until something else
+ *  happens to call `cy.zoom()`. */
+export function clampZoom(cy: Core) {
+  const min = cy.minZoom();
+  if (cy.zoom() >= min) return;
+  cy.zoom({ level: min, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
 }
 
 /**
  * Frame the whole map. This replaces `cy.fit()`, which measures drawn geometry —
  * now deliberately clamped and, off-screen, deliberately stale — and which assumes
  * the content shrinks linearly with the zoom, which it does not under compensation.
+ *
+ * The zoom floor is already correct when this runs: `syncGeometry` refreshes it
+ * one step earlier, against the same freshly-built extent model.
  */
 export function fitToContent(cy: Core, settings: Settings, padding = FIT_PADDING) {
   const solved = solve(cy, settings, padding);
   if (!solved) return;
 
-  refreshMinZoom(cy, settings, true);
   const zoom = Math.min(Math.max(solved.zoom, cy.minZoom()), cy.maxZoom());
 
   /* centre on the extent at the factor that zoom actually produces */
@@ -68,6 +90,10 @@ export function fitToContent(cy: Core, settings: Settings, padding = FIT_PADDING
 /**
  * Keep the viewport within a viewport's width of the content. A user who has
  * panned a 60 000-px map into empty space has, in effect, lost their map.
+ *
+ * Two callers, deliberately: `syncGeometry` (the content moved under the
+ * viewport) and the live `viewport` handler (the viewport moved over the
+ * content). Neither is a "reset".
  */
 export function clampPan(cy: Core, settings: Settings) {
   const model = extentModel(cy, settings);

@@ -63,8 +63,13 @@ a logarithmically-drawn **weight**, plus two special modes:
   Locked with no prerequisites means sealed for good.
 
 **Grouping** — a translucent rounded box behind a set of locations, with its own name,
-body colour and (independently settable) title colour. Groupings nest arbitrarily
-deep; cycles are rejected by the API and enforced by a database trigger.
+body colour and (independently settable) title colour. A grouping can also carry
+**default styling** — shape, size, box/text colour — which is stamped onto a room the
+moment it is *created* inside it. Moving a room in never restyles it; the inspector's
+**Re-Apply Styling** does, on demand. Groupings are created from the sidebar, from a
+room's right-click menu, or from a multi-selection, and are not drawn until at least
+one room is in them. Groupings nest arbitrarily deep; cycles are rejected by the API
+and enforced by a database trigger.
 Overlapping groupings are **stacked**: on a coordinate layout they are ordered along
 the axis that plane does not show (X/Y → by Z, lowest underneath), and on every other
 layout by the area each box covers once positioning finishes, largest underneath. A
@@ -74,7 +79,7 @@ Because a grouping box covers a lot of canvas, what a drag inside one does is a
 setting — and the same choice is available for rooms: **Always Draggable** (grabs, so
 you cannot pan over it), **Never Draggable** (always pans), or **Draggable When
 Selected** (both at once: drag to pan, click the thing to pick it up, drag it, then
-click away or press `Esc`). Groupings default to *When Selected*, rooms to *Always*.
+click away or press `Esc`). Groupings and rooms both default to *When Selected*.
 Under the hood this flips Cytoscape's per-element `grabbable`/`pannable` pair; clicking
 to select, marquee multi-select and multi-drag all keep working in every mode.
 Anything currently panned through is also exempted from Cytoscape's default `:active`
@@ -87,11 +92,22 @@ a large room never buries a small one it overlaps. Rooms are opaque, so the occl
 stub shares its anchor room's layer.
 
 **Label** — a reusable category that *stamps* opt-in defaults onto whatever it is
-applied to. Location labels can set shape, box colour, text colour, layer and
-size, grouping; connection labels can set line/text colour, direction, line style, weight,
-ephemeral state and the whole lock condition. Applying a label writes those defaults
+applied to. Location labels can set shape, box colour, text colour, size and grouping;
+connection labels can set line/text colour, direction, line style, weight, ephemeral
+state and the whole lock condition. Applying a label writes those defaults
 immediately, so the **last label applied wins**, and every chip keeps an **Apply**
 button to re-stamp on demand. Blank/"No Override" fields are never applied.
+
+### Two systems, one rule
+
+Labels and groupings both stamp room styling, so each carries a flag saying whether it
+may overwrite the other — and the rule is per **property**, not per room:
+
+> a stamp never writes a property the other system already claims,
+> unless its own override flag says it may.
+
+A grouping that sets shape and colour still sets the shape of a room whose label only
+claims the colour. Label-over-label is unaffected: the last label applied always wins.
 
 ---
 
@@ -105,13 +121,13 @@ button to re-stamp on demand. Blank/"No Override" fields are never applied.
 | Inspect / edit | Click anything. Edits apply on **Apply** or when you click outside the panel. Controls that act immediately (labels, grouping, visited) never discard what you have typed — only **Revert** does |
 | Resize a room | Inspector → **Size** (or **Change Size** when several are selected) |
 | Multi-select | **Right-drag** empty space *or a grouping box* to marquee rooms; drag any one to move them all; the inspector mass-edits shape, grouping, colours and visited |
-| Groupings | Right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, deselect, ungroup, delete |
+| Groupings | Sidebar → **Groupings**, or right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, deselect, ungroup, delete |
 | Labels | Sidebar → **Labels**; add chips from a location's or connection's inspector |
 | Mark visited | Double-click a room, or the inspector checkbox. **Reset All Visited** in the Trip Planner clears them all |
 | Search | Sidebar search with Notes / Locations / Connections toggles and a **Filter By Label** |
 | Layouts | Toolbar: ELK Layered, ELK Tree, fCoSE, Breadth-First, Concentric, Grid, Saved Positions — plus **Coordinate Grid** (X/Y, X/Z, Y/Z) |
 | Trip planning | Sidebar → **Trip Planner** |
-| Settings | Cogwheel: scroll sensitivity, base size, zoom-independent sizing, tiny-label culling, drag-vs-pan for groupings and locations, planner time limit. Each has a `?` for the detail |
+| Settings | Cogwheel: scroll sensitivity, base size, zoom-independent sizing, the zoomed-out skeleton (line thickness, whether it draws lines at all, and whether you may zoom out into it), ephemeral style, drag-vs-pan for groupings and locations, planner time limit. Each has a `?` for the detail |
 | Delete | Select, then `Del`. `Esc` closes the top-most overlay (menu → modal → selection) |
 | Import/Export | Toolbar — full JSON round-trip including groupings, labels and coordinates |
 
@@ -200,11 +216,12 @@ POST   /maps/:mapId/reset-visited
 ### Groupings
 
 ```
-POST   /maps/:mapId/groups            { name?, color?, textColor?, notes?, parentId?, locationIds? }
+POST   /maps/:mapId/groups            { name?, color?, textColor?, notes?, parentId?, locationIds?, default*, overrideLabels? }
 GET    /groups/:id
 PATCH  /groups/:id                    (parentId is cycle-checked)
 DELETE /groups/:id                    (contents move up a level)
 POST   /groups/:id/ungroup
+POST   /groups/:id/apply              -> { locations[] }   (direct members only)
 ```
 
 ### Labels
@@ -234,6 +251,7 @@ POST   /maps/:mapId/locations
 GET    /locations/:id
 PATCH  /locations/:id                 (groupId / coordX|Y|Z accept explicit null to clear)
 DELETE /locations/:id
+POST   /locations/:id/group/apply     -> location   (re-stamp this room's own grouping's defaults)
 
 POST   /maps/:mapId/connections
 GET    /connections/:id
@@ -347,9 +365,10 @@ are `CHECK`-constrained positive.
 * `buildElements` still rebuilds the whole element array on every store change (the
   diffing above keeps that cheap, but the allocation is O(elements)). Memoising it per
   row would be the next optimisation for maps in the tens of thousands.
-* The schema has no migration path, by design. Adding a column means recreating the
-  database: export your maps, `docker compose down -v`, `docker compose up --build`,
-  then import (import fills in anything an older export is missing, e.g. `size: 1`).
+* The schema has no migration *system*, but additive changes are applied idempotently
+  (`ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS`) on boot, so an existing
+  database converges. Anything non-additive still means export, `docker compose down -v`,
+  re-import (import fills in anything an older export is missing, e.g. `size: 1`).
 * Zoom-independent sizing inflates boxes in *model* space when you zoom out, while layouts
   are solved against base geometry, so at extreme zoom-out compensated boxes can visually
   crowd each other. Lower the strength — or leave the feature off and raise **Base Size**

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { cyHolder } from '../graph/cyHolder';
-import { drawnExtentAt, extentModel, invalidateExtent, type ExtentModel } from '../graph/extent';
+import { drawnExtentAt, extentModel, type ExtentModel } from '../graph/extent';
 import { textFactorAt } from '../graph/viewScale';
 import { useGraphStore } from '../state/store';
 
@@ -16,9 +16,6 @@ const EMPTY: Bar = { size: 1, offset: 0, visible: false };
 
 /** Breathing room past the content on each side, as a fraction of the viewport. */
 const EDGE_PAD = 1 / 16;
-
-/** Re-measuring the whole graph is O(elements), so the content box is cached. */
-const CONTENT_THROTTLE_MS = 150;
 
 /** Sub-pixel changes must not re-render React every animation frame. */
 const settled = (a: Bar, b: Bar) =>
@@ -42,10 +39,10 @@ export default function GraphScrollbars() {
     if (!cy) return;
 
     let frame = 0;
-    let contentTimer: ReturnType<typeof setTimeout> | null = null;
 
     const readContent = () => {
-      invalidateExtent(cy);
+      /* `syncGeometry` has already invalidated and rebuilt the model — this is
+         a cache hit, not a measurement */
       modelRef.current = extentModel(cy, settings);
     };
 
@@ -88,29 +85,21 @@ export default function GraphScrollbars() {
       if (!frame) frame = requestAnimationFrame(update);
     };
 
-    /* elements moving is common (drags, layouts) and measuring is the expensive
-       part, so it is throttled rather than run per event */
-    const remeasure = () => {
-      if (contentTimer) return;
-      contentTimer = setTimeout(() => {
-        contentTimer = null;
-        readContent();
-        schedule();
-      }, CONTENT_THROTTLE_MS);
+    const onGeometry = () => {
+      readContent();
+      schedule();
     };
 
     readContent();
     cy.on('viewport', schedule);
-    /* `position` fires once per node per frame during an animated layout —
-       remeasure on the coarser events that actually mean geometry settled */
-    cy.on('add remove dragfree layoutstop mapgraphgeometry', remeasure);
+    /* one signal, emitted once per geometry reset, after everything has settled */
+    cy.on('mapgraphgeometry', onGeometry);
     schedule();
 
     return () => {
       cy.off('viewport', schedule);
-      cy.off('add remove dragfree layoutstop mapgraphgeometry', remeasure);
+      cy.off('mapgraphgeometry', onGeometry);
       if (frame) cancelAnimationFrame(frame);
-      if (contentTimer) clearTimeout(contentTimer);
     };
   }, [settings]);
 

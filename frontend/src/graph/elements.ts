@@ -205,10 +205,15 @@ export function buildElements(
           memberCount: count,
           /* un-wrapped, so it feeds the label ceiling (see viewScale) */
           labelWidth: rawGroupW * scale,
-          /* the skeleton view's title fit reads this through `namePlate()`,
-             same as locations and portals — one accessor, one contract */
           lw: rawGroupW * scale,
           lh: rawGroupW ? GROUP_LINE_HEIGHT * scale : 0,
+          /* …and these are the *raw* metrics at the base font, with no Base
+             Size folded in: in the skeleton `tView` replaces Base Size rather
+             than multiplying it, so the drawn title is exactly
+             `titleW × tView` wide and `titleH × tView` tall. That identity is
+             what lets the fit below hand the title exactly the space it needs. */
+          titleW: rawGroupW,
+          titleH: rawGroupW ? GROUP_LINE_HEIGHT : 0,
           /* neutral defaults; the layering pass refines them after every
              arrangement (see graph/layering) */
           zLayer: 1,
@@ -363,7 +368,8 @@ export function buildElements(
               labelWidth: measureLabelWidth(label, EDGE_LABEL_FONT) * scale,
               tView: scale,
               minFontView: 0,
-              lineView: 1
+              lineView: 1,
+              edgeHidden: 0
             },
             classes: ['connection', shared.hasNotes ? 'has-notes' : ''].filter(Boolean).join(' ')
           }
@@ -432,6 +438,23 @@ export function buildElements(
       const outPlate = arrows ? { lw: 0, lh: 0 } : plateFor(outNodeLabel, PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1, scale);
       const inPlate = arrows ? { lw: 0, lh: 0 } : plateFor(inNodeLabel, PORTAL_LABEL_FONT, PORTAL_LINE_HEIGHT, 1, scale);
 
+      /* Which end of each stub ends in empty space, and which arrowhead belongs
+         there. An arrowhead marks an end you may *arrive at*, so:
+            out stub (source room → space): the space end is the target head
+            in  stub (space → target room): the space end is the source head
+         In 'nodes' mode a head points into a labelled box. In 'arrows' mode the
+         head at the free end *is* the terminus and the only cue to the direction
+         of travel — so it is drawn larger, and the stub's description is lifted
+         off the line, because an opaque name plate pinned to the midpoint of a
+         short stub otherwise covers the line and both of its heads. An
+         undirected link still ends bare, by design. */
+      const stubArrows = {
+        sourceArrow: shared.sourceArrow,
+        targetArrow: shared.targetArrow,
+        arrowScale: arrows ? 1.7 : 1,
+        labelLift: arrows ? 14 : 0
+      };
+
       return [
         {
           data: {
@@ -481,6 +504,7 @@ export function buildElements(
         {
           data: {
             ...shared,
+            ...stubArrows,
             id: portalEdgeId(c.id, 'out'),
             source: c.sourceId,
             target: portalNodeId(c.id, 'out'),
@@ -488,13 +512,15 @@ export function buildElements(
             labelWidth: outEdgeLabel ? measureLabelWidth(outEdgeLabel, EDGE_LABEL_FONT) * scale : 0,
             tView: scale,
             minFontView: 0,
-            lineView: 1
+            lineView: 1,
+            edgeHidden: 0
           },
           classes: 'stub stub-out'
         },
         {
           data: {
             ...shared,
+            ...stubArrows,
             id: portalEdgeId(c.id, 'in'),
             source: portalNodeId(c.id, 'in'),
             target: c.targetId,
@@ -502,7 +528,8 @@ export function buildElements(
             labelWidth: inEdgeLabel ? measureLabelWidth(inEdgeLabel, EDGE_LABEL_FONT) * scale : 0,
             tView: scale,
             minFontView: 0,
-            lineView: 1
+            lineView: 1,
+            edgeHidden: 0
           },
           classes: 'stub stub-in'
         }

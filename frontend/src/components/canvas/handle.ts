@@ -4,6 +4,7 @@ import type { ConnectionIndex } from '../../graph/highlight';
 import type { LayoutName } from '../../graph/layouts';
 import type { Settings } from '../../state/settings';
 import type { ViewScaler } from '../../graph/viewScaler';
+import type { GeometrySync } from './geometry';
 
 /** Everything the canvas hooks share. Created once per map by `useCytoscape`. */
 export interface CanvasHandle {
@@ -25,8 +26,13 @@ export interface CanvasHandle {
   suppressMenuRef: MutableRefObject<boolean>;
   /** connectionId -> the elements that draw it. Rebuilt on structural change. */
   connIndexRef: MutableRefObject<ConnectionIndex>;
-  /** Frame the whole map, then let the scaler re-settle against the new viewport. */
-  fitAndRescale: (padding: number) => void;
-  /** Recompute the grouping stack and push it onto the graph. */
-  restack: (opts?: { rooms?: boolean }) => void;
+  /** A Fit that could not be solved yet (no viewport), held until it can be. */
+  pendingFitRef: MutableRefObject<number | null>;
+  /**
+   * The one and only place anything derived from the graph's geometry is
+   * recomputed — the scaler's index, the stacking passes, the extent model, the
+   * zoom floor, the viewport and the view scale. Coalesced: every caller in one
+   * task produces exactly one reset.
+   */
+  sync: (opts?: GeometrySync) => void;
 }

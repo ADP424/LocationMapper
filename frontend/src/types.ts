@@ -24,6 +24,13 @@ export interface Group {
   color: string;
   textColor: string;
   notes: string;
+  /** Stamped onto rooms *created* inside this grouping; '' / null = no override. */
+  defaultKind: string;
+  defaultSize: number | null;
+  defaultColor: string;
+  defaultTextColor: string;
+  /** Stamp over properties the room's labels already claim. */
+  overrideLabels: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,6 +96,8 @@ export interface LocationLabel {
   defaultColor: string;
   defaultTextColor: string;
   defaultGroupId: string | null;
+  /** Stamp over properties the room's grouping already claims. */
+  overrideGroupings: boolean;
   createdAt: string;
   updatedAt: string;
 }

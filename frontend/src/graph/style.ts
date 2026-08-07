@@ -41,19 +41,23 @@ export const graphStyle: any[] = [
       padding: 30,
       label: 'data(label)',
       color: 'data(textColor)',
+      /* the same family `measure.ts` measures `titleW` with, so the skeleton's
+         fitted title really is the width the fit solved for */
+      'font-family': 'Inter, system-ui, -apple-system, sans-serif',
       'font-size': (e: NodeSingular) => 15 * tv(e),
       'font-weight': 'bold',
       'text-valign': 'top',
       'text-halign': 'center',
       'text-margin-y': (e: NodeSingular) => -8 * tv(e),
-      /* the title sits over whatever the box overlaps, so it gets a plate too */
-      'text-background-color': 'data(fill)',
-      'text-background-opacity': 0.92,
-      'text-background-shape': 'roundrectangle',
-      'text-background-padding': (e: NodeSingular) => 4 * tv(e),
-      'text-border-width': (e: NodeSingular) => 1 * tv(e),
-      'text-border-color': 'data(border)',
-      'text-border-opacity': 0.6,
+      /* A grouping's title takes **no** plate. Its colour falls back to the
+         body colour, so a plate in that same colour rendered it invisible —
+         and, scaled by the skeleton's fit factor, the plate and its border
+         dwarfed the text they were supposed to back. */
+      'text-wrap': 'none',
+      /* exactly as much room as the title needs, and never an inch less, so
+         Cytoscape can neither wrap it nor clip it at the sides */
+      'text-max-width': (e: NodeSingular) =>
+        Math.max(1, ((e.data('titleW') as number) || 0) * tv(e) + 4),
       'min-zoomed-font-size': 'data(minFontView)',
       'z-compound-depth': 'bottom',
       'transition-property': 'border-color, background-opacity, opacity',
@@ -171,6 +175,12 @@ export const graphStyle: any[] = [
     selector: 'edge',
     style: {
       width: lineW,
+      /* The skeleton can be told to drop the lines altogether. `display` is the
+         one property no other rule in this stylesheet sets, so neither a
+         highlight nor a route dim can resurrect a hidden line — and a
+         `display: none` element is skipped by the renderer and by hit testing,
+         which is the whole point of the setting. */
+      display: (e: EdgeSingular) => (e.data('edgeHidden') ? 'none' : 'element'),
       'line-color': 'data(lineColor)',
       'line-style': 'data(lineStyle)',
       'target-arrow-color': 'data(lineColor)',
@@ -201,10 +211,24 @@ export const graphStyle: any[] = [
   },
   /* stubs keep their own geometry but NOT their own colour or dash pattern;
      the connection's name rides the line, italic, in both ephemeral modes —
-     the cue that this is a link to elsewhere, not a room */
+     the cue that this is a link to elsewhere, not a room.
+
+     Both ends carry whichever arrowhead the connection designates for them.
+     In "arrows into space" mode the free end has no box to arrive at, so that
+     head is the terminus: it is scaled up, and the description is lifted clear
+     of the line so it cannot paint over the head it is describing. */
   {
     selector: 'edge.stub',
-    style: { 'curve-style': 'straight', 'arrow-scale': 1, 'font-style': 'italic' }
+    style: {
+      'curve-style': 'straight',
+      'font-style': 'italic',
+      'source-arrow-shape': 'data(sourceArrow)',
+      'target-arrow-shape': 'data(targetArrow)',
+      'source-arrow-color': 'data(lineColor)',
+      'target-arrow-color': 'data(lineColor)',
+      'arrow-scale': (e: EdgeSingular) => (e.data('arrowScale') as number) || 1,
+      'text-margin-y': (e: EdgeSingular) => -((e.data('labelLift') as number) || 0) * tv(e)
+    }
   },
 
   /* ------------------------------------------------- selection states */

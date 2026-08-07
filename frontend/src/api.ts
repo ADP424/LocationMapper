@@ -53,14 +53,15 @@ export const api = {
   resetVisited: (mapId: string) => request<{ cleared: number }>(`/maps/${mapId}/reset-visited`, post()),
 
   /* groups */
-  createGroup: (
-    mapId: string,
-    body: { name?: string; color?: string; notes?: string; parentId?: string | null; locationIds?: string[] }
-  ) => request<Group>(`/maps/${mapId}/groups`, post(body)),
-  updateGroup: (id: string, body: Partial<Pick<Group, 'name' | 'color' | 'textColor' | 'notes' | 'parentId'>>) =>
-    request<Group>(`/groups/${id}`, patch(body)),
+  createGroup: (mapId: string, body: Partial<Group> & { locationIds?: string[] }) =>
+    request<Group>(`/maps/${mapId}/groups`, post(body)),
+  updateGroup: (id: string, body: Partial<Group>) => request<Group>(`/groups/${id}`, patch(body)),
   deleteGroup: (id: string) => request<void>(`/groups/${id}`, del),
   ungroupAll: (id: string) => request<{ released: number }>(`/groups/${id}/ungroup`, post()),
+  applyGroupStylingToAll: (id: string) =>
+    request<{ locations: Location[] }>(`/groups/${id}/apply`, post()),
+  applyGroupStyling: (locationId: string) =>
+    request<Location>(`/locations/${locationId}/group/apply`, post()),
 
   /* locations */
   createLocation: (mapId: string, body: Partial<Location>) =>

@@ -5,13 +5,11 @@ import { BoxGrid, type Rect } from './spatialIndex';
 import {
   EMPTY_BUDGET,
   FONT_MIN,
-  GROUP_NAME_FIT_H,
-  GROUP_NAME_FIT_W,
+  GROUP_NAME_INSET,
   GROUP_NAME_MAX_PX,
   GROUP_NAME_MIN_PX,
   IDENTITY_SCALE,
   OVERSIZE_TOLERANCE,
-  namePlate,
   scaleKey,
   solveViewScale,
   type ScaleLimit,
@@ -148,9 +146,10 @@ export class ViewScaler {
     return this.drawBudget.frameMs;
   }
 
+  /** Record the new settings. Re-solving is the canvas's `syncGeometry` job,
+   *  so one settings change never runs the pass twice. */
   setSettings(next: Settings) {
     this.settings = next;
-    this.flush(true);
   }
 
   /** Structural change: re-read every element. Positions are read too. */
@@ -194,7 +193,9 @@ export class ViewScaler {
     this.reposition();
   }
 
-  /** Positions changed (drag, layout): rebuild the buckets only. */
+  /** Positions changed (drag, layout): rebuild the buckets only.
+   *  Deliberately does **not** flush: `syncGeometry` owns the single pass, and
+   *  it has to run after the stacking pass and after the zoom has settled. */
   reposition() {
     const n = this.nodes.length;
     const boxes = new Float64Array(n * 4);
@@ -236,7 +237,6 @@ export class ViewScaler {
     /* a screen-crossing edge has both endpoints off-screen; the grid's own
        "too large to bucket" rule catches exactly those and always visits them */
     this.edgeGrid.build(ebox, m);
-    this.flush(true);
   }
 
   /** A handful of elements whose own data changed. */
@@ -355,7 +355,7 @@ export class ViewScaler {
     };
     const stale = this.gather(ext, near);
 
-    const next = solveViewScale(this.cy.zoom(), this.settings, this.budget, this.scale);
+    const next = solveViewScale(this.cy.zoom(), this.settings, this.budget);
     const moved = scaleKey(next) !== this.key;
     const limitChanged = next.limit !== this.scale.limit;
     if (moved) this.applyScale(next, false);
@@ -433,9 +433,13 @@ export class ViewScaler {
 
   /**
    * In the skeleton, a grouping is the only thing left with area, so its
-   * title is fitted to *its own box*, not to Base Size (which cancels out of
-   * the fit). Nested groupings therefore reveal their names as you zoom in —
-   * a level-of-detail cascade that falls out of the fit for free.
+   * title is fitted to *its own box*. `titleW`/`titleH` are the raw text
+   * metrics at the base font, so the drawn title is exactly `title × tView`:
+   * solving `tView` from the box therefore gives the title precisely the
+   * width and height it needs, no more and no less, with `GROUP_NAME_INSET`
+   * of breathing room per side. Base Size genuinely cancels out. Nested
+   * groupings reveal their names as you zoom in — a level-of-detail cascade
+   * that falls out of the fit for free.
    */
   private writeGroup(i: number) {
     const node = this.nodes[i];
@@ -446,23 +450,21 @@ export class ViewScaler {
     let minFontView = labels ? FONT_MIN.group : LABELS_OFF;
 
     if (skeleton) {
-      const plate = namePlate(node);
+      const titleW = (node.data('titleW') as number) || 0;
+      const titleH = (node.data('titleH') as number) || 0;
       const boxW = (node.data('boxW') as number) || 0;
       const boxH = (node.data('boxH') as number) || 0;
-      if (plate.w > 0 && boxW > 0 && boxH > 0) {
-        const zoom = this.cy.zoom();
-        /* how far the title can grow, in *model units*, before it would
-           overflow its own box — a ratio of two model-unit quantities, so it
-           is the same at every zoom: a title already fills the same fraction
-           of its box on screen no matter how far zoomed out, because the box
-           shrinks right along with it. That is what makes this the correct
-           bound, not a zoom-dependent one. */
-        let t = Math.min(
-          (GROUP_NAME_FIT_W * boxW) / plate.w,
-          (GROUP_NAME_FIT_H * boxH) / Math.max(plate.h, 1)
-        );
-        const rendered = GROUP_FONT * t * zoom;
+
+      if (titleW > 0 && titleH > 0 && boxW > 0 && boxH > 0) {
+        /* a ratio of two model-unit quantities, so it is the same at every
+           zoom: the box shrinks right along with the title */
+        const availW = boxW * (1 - 2 * GROUP_NAME_INSET);
+        const availH = boxH * (1 - 2 * GROUP_NAME_INSET);
+        let t = Math.min(availW / titleW, availH / titleH);
+
+        const rendered = GROUP_FONT * t * this.cy.zoom();
         if (rendered > GROUP_NAME_MAX_PX) t *= GROUP_NAME_MAX_PX / rendered;
+
         tView = t;
         /* Cytoscape culls it for us once the fitted title is too small to
            read — which happens exactly when the box itself has shrunk past
@@ -479,12 +481,15 @@ export class ViewScaler {
   }
 
   private writeEdge(j: number) {
-    const { text, labels, skeleton, line } = this.scale;
+    const { text, labels, skeleton, lines, line } = this.scale;
     const base = Math.max(0.05, this.settings.baseScale);
     this.edges[j].data({
       tView: base * text,
       minFontView: labels ? FONT_MIN.edge : LABELS_OFF,
-      lineView: skeleton ? line : 1
+      lineView: skeleton ? line : 1,
+      /* a line-less skeleton takes the connections out of drawing *and* hit
+         testing entirely — see `display` in style.ts */
+      edgeHidden: lines ? 0 : 1
     });
     this.edgeGen[j] = this.serial;
   }

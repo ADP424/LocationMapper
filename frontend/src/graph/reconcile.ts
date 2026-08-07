@@ -3,10 +3,10 @@ import { isInternalId } from './elements';
 
 const IMMUTABLE = new Set(['id', 'source', 'target', 'parent']);
 /** Owned by runtime passes (stacking, view scale) — a reconcile must not reset
- *  them: `tView`/`minFontView`/`skel`/`lineView` are the ViewScaler's own
- *  write set, `boxW`/`boxH` are the layering pass's measured group box (feeds
- *  the skeleton's title fit), and `zLayer`/`groupFillOpacity`/
- *  `groupBorderOpacity` are the stacking pass's. */
+ *  them: `tView`/`minFontView`/`skel`/`lineView`/`edgeHidden` are the
+ *  ViewScaler's own write set, `boxW`/`boxH` are the layering pass's measured
+ *  group box, and `zLayer`/`groupFillOpacity`/`groupBorderOpacity` are the
+ *  stacking pass's. */
 const RUNTIME = new Set([
   'zLayer',
   'groupFillOpacity',
@@ -16,7 +16,8 @@ const RUNTIME = new Set([
   'tView',
   'minFontView',
   'skel',
-  'lineView'
+  'lineView',
+  'edgeHidden'
 ]);
 const BASE_CLASSES = [
   'group',
@@ -53,6 +54,8 @@ function mutableData(data: Record<string, unknown>) {
 export interface ReconcileResult {
   /** Elements were added or removed, or an edge was re-pointed. */
   structural: boolean;
+  /** At least one element's position was written — the drawn extent moved. */
+  moved: boolean;
   /** Element ids whose geometry-bearing data changed — feed to `ViewScaler.markDirty`. */
   dirty: string[];
 }
@@ -79,10 +82,10 @@ export function reconcile(
   if (fullReset) {
     cy.elements().remove();
     cy.add(desired.map((el) => ({ ...withFallback(el), data: { ...withFallback(el).data } })));
-    return { structural: true, dirty: [] };
+    return { structural: true, moved: true, dirty: [] };
   }
 
-  const result: ReconcileResult = { structural: false, dirty: [] };
+  const result: ReconcileResult = { structural: false, moved: false, dirty: [] };
   cy.batch(() => {
     const wanted = new Map<string, ElementDefinition>();
     for (const el of desired) wanted.set(String(el.data!.id), el);
@@ -165,6 +168,7 @@ export function reconcile(
         const p = existing.position();
         if (Math.abs(p.x - el.position.x) > 0.5 || Math.abs(p.y - el.position.y) > 0.5) {
           existing.position(el.position);
+          result.moved = true;
         }
       }
     });

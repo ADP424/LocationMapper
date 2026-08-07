@@ -1,6 +1,4 @@
 import { useEffect } from 'react';
-import { invalidateExtent } from '../../graph/extent';
-import { refreshMinZoom } from '../../graph/zoomBounds';
 import type { Settings } from '../../state/settings';
 import type { CanvasHandle } from './handle';
 
@@ -12,8 +10,8 @@ export function useCanvasSettings(handle: CanvasHandle | null, settings: Setting
     /* a running layout owns the geometry — re-applying scale here would clamp
        the unclamped pass it is solving against */
     if (!handle.layoutScaleLockRef.current) handle.scaler.setSettings(settings);
-    invalidateExtent(handle.cy);
-    refreshMinZoom(handle.cy, settings, true);
-    handle.cy.forceRender();
+    /* Base Size, compensation and the skeleton all move the drawn extent, so
+       every bound is a function of the settings. One reset, in one place. */
+    handle.sync({ force: true });
   }, [handle, settings]);
 }

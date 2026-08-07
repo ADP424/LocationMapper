@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS groups (
   color        text        NOT NULL DEFAULT '',
   text_color   text        NOT NULL DEFAULT '',   -- '' = follow the body colour
   notes        text        NOT NULL DEFAULT '',
+  -- label-style defaults, stamped onto rooms created inside this grouping
+  default_kind       text NOT NULL DEFAULT '',
+  default_size       double precision
+    CONSTRAINT groups_default_size_positive CHECK (default_size IS NULL OR default_size > 0),
+  default_color      text NOT NULL DEFAULT '',
+  default_text_color text NOT NULL DEFAULT '',
+  -- stamp over properties the room's labels already claim
+  override_labels    boolean NOT NULL DEFAULT false,
   created_at   timestamptz NOT NULL DEFAULT now(),
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
@@ -112,6 +120,8 @@ CREATE TABLE IF NOT EXISTS location_labels (
   default_color       text        NOT NULL DEFAULT '',   -- box fill
   default_text_color  text        NOT NULL DEFAULT '',
   default_group_id    uuid                 REFERENCES groups(id) ON DELETE SET NULL,
+  -- stamp over properties the room's grouping already claims
+  override_groupings  boolean     NOT NULL DEFAULT false,
   created_at          timestamptz NOT NULL DEFAULT now(),
   updated_at          timestamptz NOT NULL DEFAULT now()
 );
@@ -160,6 +170,23 @@ CREATE TABLE IF NOT EXISTS connection_label_assignments (
 -- converges on next boot with no separate migration step.
 ALTER TABLE locations       DROP COLUMN IF EXISTS layer;
 ALTER TABLE location_labels DROP COLUMN IF EXISTS default_layer;
+
+-- Groupings grew label-style defaults, and both systems grew the flag that
+-- decides which of the two wins. ADD COLUMN IF NOT EXISTS is idempotent, so an
+-- existing database converges on next boot with no separate migration step.
+ALTER TABLE groups          ADD COLUMN IF NOT EXISTS default_kind       text NOT NULL DEFAULT '';
+ALTER TABLE groups          ADD COLUMN IF NOT EXISTS default_size       double precision;
+ALTER TABLE groups          ADD COLUMN IF NOT EXISTS default_color      text NOT NULL DEFAULT '';
+ALTER TABLE groups          ADD COLUMN IF NOT EXISTS default_text_color text NOT NULL DEFAULT '';
+ALTER TABLE groups          ADD COLUMN IF NOT EXISTS override_labels    boolean NOT NULL DEFAULT false;
+ALTER TABLE location_labels ADD COLUMN IF NOT EXISTS override_groupings boolean NOT NULL DEFAULT false;
+
+-- the inline CHECK above is named, so adding it here twice is a no-op
+DO $mig$ BEGIN
+  ALTER TABLE groups
+    ADD CONSTRAINT groups_default_size_positive CHECK (default_size IS NULL OR default_size > 0);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $mig$;
 
 CREATE INDEX IF NOT EXISTS groups_map_idx             ON groups(map_id);
 CREATE INDEX IF NOT EXISTS groups_parent_idx          ON groups(parent_id);

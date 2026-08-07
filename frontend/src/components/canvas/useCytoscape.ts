@@ -3,15 +3,15 @@ import elk from 'cytoscape-elk';
 import fcose from 'cytoscape-fcose';
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { cyHolder } from '../../graph/cyHolder';
+import type { LayoutName } from '../../graph/layouts';
 import { graphStyle } from '../../graph/style';
 import type { ScaleLimit } from '../../graph/viewScale';
 import { ViewScaler } from '../../graph/viewScaler';
 import { bindWheelZoom } from '../../graph/wheelZoom';
-import { DEFAULT_MIN_ZOOM, MAX_ZOOM, clampPan, fitToContent, refreshMinZoom } from '../../graph/zoomBounds';
+import { DEFAULT_MIN_ZOOM, FIT_PADDING, MAX_ZOOM, clampPan } from '../../graph/zoomBounds';
 import { useGraphStore } from '../../state/store';
-import type { LayoutName } from '../../graph/layouts';
+import { createGeometrySync } from './geometry';
 import type { CanvasHandle } from './handle';
-import { restack as restackImpl } from './restack';
 
 let extensionsRegistered = false;
 function registerExtensions() {
@@ -73,17 +73,12 @@ export function useCytoscape(
     const cxtStartRef: CanvasHandle['cxtStartRef'] = { current: null };
     const suppressMenuRef = { current: false };
     const connIndexRef: CanvasHandle['connIndexRef'] = { current: new Map() };
+    const pendingFitRef: CanvasHandle['pendingFitRef'] = { current: null };
 
     const scaler = new ViewScaler(cy, settingsRef.current, (limit) => {
       const notice = LIMIT_NOTICE[limit];
       if (notice) useGraphStore.getState().setStatus(notice);
     });
-
-    const fitAndRescale = (padding: number) => {
-      fitToContent(cy, settingsRef.current, padding);
-      scaler.flush(true);
-    };
-    const restack = (opts?: { rooms?: boolean }) => restackImpl(cy, layeringSourceRef.current, opts);
 
     const h: CanvasHandle = {
       cy,
@@ -94,13 +89,15 @@ export function useCytoscape(
       cxtStartRef,
       suppressMenuRef,
       connIndexRef,
-      fitAndRescale,
-      restack
+      pendingFitRef,
+      /* replaced on the next line: the scheduler has to close over the handle */
+      sync: () => undefined
     };
-    handleRef.current = h;
+    h.sync = createGeometrySync(h);
 
+    handleRef.current = h;
     cyHolder.cy = cy;
-    cyHolder.fit = (padding = 60) => fitAndRescale(padding);
+    cyHolder.fit = (padding = FIT_PADDING) => h.sync({ fit: padding });
 
     /* the app owns wheel zooming — see graph/wheelZoom for why Cytoscape's is
        bypassed. Sensitivity is read per event, so Settings applies instantly. */
@@ -109,6 +106,8 @@ export function useCytoscape(
       blocked: () => !!cxtStartRef.current?.moved || cy.nodes(':grabbed').nonempty()
     });
 
+    /* the *live* pan guard: the viewport moved over the content. (The other
+       direction — the content moved under the viewport — is `syncGeometry`.) */
     let panClampFrame = 0;
     const onViewportClamp = () => {
       if (panClampFrame) return;
@@ -119,17 +118,20 @@ export function useCytoscape(
     };
     cy.on('viewport', onViewportClamp);
 
-    let fittedOnce = false;
+    let lastW = containerRef.current.clientWidth;
+    let lastH = containerRef.current.clientHeight;
     const ro = new ResizeObserver(() => {
       const el = containerRef.current;
-      if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
+      if (!el) return;
+      const w = el.clientWidth;
+      const hgt = el.clientHeight;
+      if (!w || !hgt || (w === lastW && hgt === lastH)) return;
+      lastW = w;
+      lastH = hgt;
       cy.resize();
-      refreshMinZoom(cy, settingsRef.current);
-      if (!fittedOnce && cy.nodes().length) {
-        fittedOnce = true;
-        fitAndRescale(60);
-      }
-      cy.forceRender();
+      /* the zoom floor is a function of the viewport, and a Fit that could not
+         be solved while the canvas had no size is latched until exactly here */
+      h.sync();
     });
     ro.observe(containerRef.current);
 

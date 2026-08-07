@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { query } from '../db';
+import { query, withTransaction } from '../db';
 import { ah, notFound } from '../http';
 import { assertGroupOnMap, assertMapExists, fetchLocation, mapIdOf } from '../repo';
 import { insertSql, updateSql } from '../sql';
+import { applyGroupStyling } from '../styling';
 import { locationCreate, locationUpdate, uuid } from '../validation';
 
 export const locationsRouter = Router();
@@ -24,6 +25,16 @@ const columns = (b: ReturnType<typeof locationCreate.parse>) => ({
   coord_z: b.coordZ
 });
 
+/** Styling the request set by hand: a grouping's defaults must not clobber it. */
+const explicitStyling = (b: ReturnType<typeof locationCreate.parse>) => {
+  const keys: string[] = [];
+  if (b.kind !== undefined) keys.push('kind');
+  if (b.size !== undefined) keys.push('size');
+  if (b.color !== undefined) keys.push('color');
+  if (b.textColor !== undefined) keys.push('text_color');
+  return keys;
+};
+
 locationsRouter.post(
   '/maps/:mapId/locations',
   ah(async (req, res) => {
@@ -32,9 +43,30 @@ locationsRouter.post(
     await assertMapExists(mapId);
     if (b.groupId) await assertGroupOnMap(b.groupId, mapId);
 
-    const stmt = insertSql('locations', { map_id: mapId, ...columns(b) }, 'id');
-    const { rows } = await query(stmt.text, stmt.values);
-    res.status(201).json(await fetchLocation(rows[0].id));
+    const id = await withTransaction(async (client) => {
+      const stmt = insertSql('locations', { map_id: mapId, ...columns(b) }, 'id');
+      const { rows } = await client.query(stmt.text, stmt.values);
+      const id = rows[0].id as string;
+      /* a room *created* inside a grouping takes its styling immediately; one
+         that is merely moved in does not, exactly as with labels */
+      if (b.groupId) await applyGroupStyling(client, id, b.groupId, explicitStyling(b));
+      return id;
+    });
+
+    res.status(201).json(await fetchLocation(id));
+  })
+);
+
+/** Stamp this room's own grouping's defaults onto it, on demand. */
+locationsRouter.post(
+  '/locations/:id/group/apply',
+  ah(async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const location = await fetchLocation(id); // 404s if it is gone
+    if (location.groupId) {
+      await withTransaction((client) => applyGroupStyling(client, id, location.groupId!));
+    }
+    res.json(await fetchLocation(id));
   })
 );
 

@@ -82,7 +82,7 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
           .descendants('node.location')
           .map((n: any) => ({ id: n.id(), x: n.position().x, y: n.position().y }));
         store.queuePositions(list);
-        handle.restack();
+        handle.sync();
         return;
       }
       if (node.hasClass('portal')) {
@@ -93,6 +93,8 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
         node.data('offsetX', dx);
         node.data('offsetY', dy);
         store.queuePortalOffset(node.id(), dx, dy);
+        /* a stub dragged into open space really does move the drawn extent */
+        handle.sync({ rooms: false });
         return;
       }
       const selected = cy.nodes('.location:selected');
@@ -105,7 +107,7 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
       }
       /* only the grouping *footprints* can have changed — room order depends
          on area/off-plane coordinate, neither of which a drag changes */
-      handle.restack({ rooms: false });
+      handle.sync({ rooms: false });
     };
 
     cy.on('tap', 'node', onNodeTap);

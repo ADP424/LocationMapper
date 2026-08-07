@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { PoolClient } from 'pg';
 import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
-import { applyConnectionLabel, applyLocationLabel } from '../labelStyling';
+import { applyConnectionLabel, applyLocationLabel } from '../styling';
 import { mapLocationLabel } from '../mappers';
 import {
   assertGroupOnMap,
@@ -176,7 +176,8 @@ const locationLabelColumns = (b: ReturnType<typeof locationLabelCreate.parse>) =
   default_size: b.defaultSize,
   default_color: b.defaultColor,
   default_text_color: b.defaultTextColor,
-  default_group_id: b.defaultGroupId
+  default_group_id: b.defaultGroupId,
+  override_groupings: b.overrideGroupings
 });
 
 labelsRouter.post(
