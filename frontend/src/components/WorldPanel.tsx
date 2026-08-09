@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphStore } from '../state/store';
 import { isPlaced, MARKER_MODE_LABELS, type MarkerMode } from '../world/scene/graphData';
+import { CheckField } from './fields';
+
+type BaseMarkerMode = Exclude<MarkerMode, 'route'>;
 import { canPickDirectory } from '../world/source/worldSource';
-import { UNLIMITED } from '../world/worldPrefs';
+import { TOUR_SPEED_BASE, TOUR_SPEED_MAX, TOUR_SPEED_MIN, UNLIMITED } from '../world/worldPrefs';
 import { useWorldStore } from '../world/worldStore';
 
 const DISTANCES = [4, 8, 12, 16, 20, 24];
@@ -41,9 +44,13 @@ export default function WorldPanel() {
   const markerMode = useWorldStore((s) => s.markerMode);
   const markerDistance = useWorldStore((s) => s.markerDistance);
   const labelDistance = useWorldStore((s) => s.labelDistance);
+  const routeOnly = useWorldStore((s) => s.routeOnly);
   const setMarkerMode = useWorldStore((s) => s.setMarkerMode);
+  const setRouteOnly = useWorldStore((s) => s.setRouteOnly);
   const setMarkerDistance = useWorldStore((s) => s.setMarkerDistance);
   const setLabelDistance = useWorldStore((s) => s.setLabelDistance);
+  const tourSpeed = useWorldStore((s) => s.tourSpeed);
+  const setTourSpeed = useWorldStore((s) => s.setTourSpeed);
   const labelMode = useGraphStore((s) => s.labelMode);
 
   const [path, setPath] = useState(savedRoot);
@@ -168,14 +175,28 @@ export default function WorldPanel() {
 
       <label className="inline-label">
         Show Markers
-        <select value={markerMode} onChange={(e) => setMarkerMode(e.target.value as MarkerMode)}>
-          {(Object.keys(MARKER_MODE_LABELS) as MarkerMode[]).map((m) => (
+        <select
+          value={markerMode}
+          disabled={routeOnly && hasPlan}
+          onChange={(e) => setMarkerMode(e.target.value as BaseMarkerMode)}
+        >
+          {(Object.keys(MARKER_MODE_LABELS) as BaseMarkerMode[]).map((m) => (
             <option key={m} value={m}>
               {MARKER_MODE_LABELS[m]}
             </option>
           ))}
         </select>
       </label>
+
+      {/* Overrides the filter above rather than being one of its options: the
+          two answer different questions, and this is the one the user flips
+          back and forth while planning. */}
+      <CheckField
+        className="center"
+        label="Only Show The Planned Route"
+        checked={routeOnly}
+        onChange={setRouteOnly}
+      />
 
       {/* Both apply in every mode, on top of it. Markers and names are separate
           kinds of clutter — a hundred octahedra still read as a shape, a
@@ -204,14 +225,29 @@ export default function WorldPanel() {
           onChange={(e) => setLabelDistance(Number(e.target.value))}
         />
       </label>
+      {/* A weight, not a speed: the tour eases in and out of its cruise, and
+          this scales that whole shape rather than replacing it. */}
+      <label className="inline-label">
+        Tour Speed — {Math.round(tourSpeed * 100)}% (
+        {Math.round(TOUR_SPEED_BASE * tourSpeed)} Blocks/Sec)
+        <input
+          type="range"
+          min={TOUR_SPEED_MIN}
+          max={TOUR_SPEED_MAX}
+          step={0.25}
+          value={tourSpeed}
+          onChange={(e) => setTourSpeed(Number(e.target.value))}
+        />
+      </label>
+
       {labelMode === 'none' && (
         <p className="small muted">Labels are off in the toolbar — this has no effect until they are on.</p>
       )}
 
-      {markerMode === 'route' && !hasPlan && (
+      {routeOnly && !hasPlan && (
         <p className="small muted">No route planned yet — showing everything until there is one.</p>
       )}
-      {markerMode === 'selected' && !selection && (
+      {!routeOnly && markerMode === 'selected' && !selection && (
         <p className="small muted">Nothing selected — showing everything until something is.</p>
       )}
 

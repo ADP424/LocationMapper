@@ -19,6 +19,7 @@ import { CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 
 import type { DimensionRef } from '../source/worldSource';
 import { WorldStreamer, type StreamStats } from '../stream/streamer';
+import { tourStep } from './tour';
 import { EdgeLayer, type EdgeDatum } from './edges';
 import { FlyControls } from './flyControls';
 import { LabelLayer, type LabelDatum } from './labels';
@@ -50,21 +51,10 @@ const FOCUS_DISTANCE = 42;
 
 /* ------------------------------------------------------------- the tour */
 
-/** Blocks per second along the route. */
-const TOUR_SPEED = 18;
 /** Eye height above the path, so the camera is not inside the floor. */
 const TOUR_LIFT = 2.2;
 /** How far along the curve the camera looks, as a fraction of the whole. */
 const TOUR_LOOK_AHEAD = 0.004;
-/** Fraction of the route spent easing in and out of the cruise speed. */
-const TOUR_EASE = 0.06;
-/** Speed floor, so the ends drift rather than stall. */
-const TOUR_MIN_RATE = 0.15;
-
-const smoothstep = (x: number) => {
-  const t = Math.min(1, Math.max(0, x));
-  return t * t * (3 - 2 * t);
-};
 
 export interface GraphData {
   markers: MarkerDatum[];
@@ -119,6 +109,8 @@ export class WorldView {
   private tour: THREE.CatmullRomCurve3 | null = null;
   private tourLength = 0;
   private tourU = 0;
+  /** Weight on `TOUR_SPEED`; see `setTourSpeed`. */
+  private tourSpeed = 1;
   private readonly tourAt = new THREE.Vector3();
   private readonly tourLook = new THREE.Vector3();
 
@@ -406,6 +398,16 @@ export class WorldView {
     return true;
   }
 
+  /**
+   * Weight the tour's cruise speed. 1 is the built-in speed.
+   *
+   * Applied per frame rather than baked in at the start, so dragging the slider
+   * mid-tour changes the speed under way instead of on the next run.
+   */
+  setTourSpeed(weight: number) {
+    this.tourSpeed = Number.isFinite(weight) && weight > 0 ? weight : 1;
+  }
+
   stopTour(notify = true) {
     if (!this.tour) return;
     this.tour = null;
@@ -617,16 +619,15 @@ export class WorldView {
    * Progress is in arc length, so `dt * speed / length` is genuinely constant
    * ground speed, ramped down at both ends so the tour pulls away and settles
    * rather than starting and stopping at full tilt.
+   *
+   * The user's weight scales the cruise speed, not the ramp: at 200% every
+   * instant of the tour is twice as fast, including the ends, so the shape of
+   * the ease is the same journey played faster rather than a different one.
    */
   private advanceTour(dt: number) {
     if (!this.tour) return;
 
-    const rate =
-      TOUR_MIN_RATE +
-      (1 - TOUR_MIN_RATE) *
-        smoothstep(this.tourU / TOUR_EASE) *
-        smoothstep((1 - this.tourU) / TOUR_EASE);
-    this.tourU += ((TOUR_SPEED * dt) / this.tourLength) * rate;
+    this.tourU += tourStep(this.tourU, dt, this.tourLength, this.tourSpeed);
 
     if (this.tourU >= 1) {
       /* Land on the final stop before handing the camera back, so the tour
@@ -693,6 +694,12 @@ export class WorldView {
     const limit = this.markerDistance ** 2;
     const ids = new Set<string>();
     for (const m of this.graph?.markers ?? []) {
+      /* A pinned marker is on the planned route, and the route is exempt from
+         the distance slider — see `MarkerDatum.pinned`. */
+      if (m.pinned) {
+        ids.add(m.id);
+        continue;
+      }
       const dx = m.x + 0.5 - centre.x;
       const dy = m.y + 0.5 - centre.y;
       const dz = m.z + 0.5 - centre.z;

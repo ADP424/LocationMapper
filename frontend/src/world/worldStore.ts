@@ -28,9 +28,11 @@ interface WorldState {
   root: string;
   dimensionId: string;
   renderDistance: number;
-  markerMode: MarkerMode;
+  markerMode: Exclude<MarkerMode, 'route'>;
+  routeOnly: boolean;
   markerDistance: number;
   labelDistance: number;
+  tourSpeed: number;
 
   /** Load the preferences for a map. Cheap enough to call on every render. */
   bind: (mapId: string | null) => void;
@@ -40,9 +42,11 @@ interface WorldState {
   close: () => void;
   setDimensionId: (id: string) => void;
   setRenderDistance: (chunks: number) => void;
-  setMarkerMode: (mode: MarkerMode) => void;
+  setMarkerMode: (mode: Exclude<MarkerMode, 'route'>) => void;
+  setRouteOnly: (only: boolean) => void;
   setMarkerDistance: (blocks: number) => void;
   setLabelDistance: (blocks: number) => void;
+  setTourSpeed: (weight: number) => void;
   setError: (message: string | null) => void;
 }
 
@@ -95,8 +99,10 @@ export const useWorldStore = create<WorldState>()((set, get) => {
     dimensionId: DEFAULT_WORLD_PREF.dimensionId,
     renderDistance: DEFAULT_WORLD_PREF.renderDistance,
     markerMode: DEFAULT_WORLD_PREF.markerMode,
+    routeOnly: DEFAULT_WORLD_PREF.routeOnly,
     markerDistance: DEFAULT_WORLD_PREF.markerDistance,
     labelDistance: DEFAULT_WORLD_PREF.labelDistance,
+    tourSpeed: DEFAULT_WORLD_PREF.tourSpeed,
 
     bind: (mapId) => {
       if (mapId === get().mapId) return;
@@ -130,6 +136,11 @@ export const useWorldStore = create<WorldState>()((set, get) => {
       remember({ markerMode });
     },
 
+    setRouteOnly: (routeOnly) => {
+      set({ routeOnly });
+      remember({ routeOnly });
+    },
+
     setMarkerDistance: (markerDistance) => {
       set({ markerDistance });
       remember({ markerDistance });
@@ -138,6 +149,11 @@ export const useWorldStore = create<WorldState>()((set, get) => {
     setLabelDistance: (labelDistance) => {
       set({ labelDistance });
       remember({ labelDistance });
+    },
+
+    setTourSpeed: (tourSpeed) => {
+      set({ tourSpeed });
+      remember({ tourSpeed });
     },
 
     setError: (error) => set({ error })

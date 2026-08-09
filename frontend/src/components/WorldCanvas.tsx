@@ -44,12 +44,17 @@ export default function WorldCanvas() {
   const dimension = useWorldStore(currentDimension);
   const renderDistance = useWorldStore((s) => s.renderDistance);
   const spawn = useWorldStore((s) => s.source?.level?.spawn ?? null);
-  const markerMode = useWorldStore((s) => s.markerMode);
+  const baseMarkerMode = useWorldStore((s) => s.markerMode);
+  const routeOnly = useWorldStore((s) => s.routeOnly);
   const markerDistance = useWorldStore((s) => s.markerDistance);
   const labelDistance = useWorldStore((s) => s.labelDistance);
+  const tourSpeed = useWorldStore((s) => s.tourSpeed);
 
   const selectedId = selection?.type === 'location' ? selection.id : null;
   const route = useMemo(() => routeHighlight(plan, waypoints), [plan, waypoints]);
+  /* The toggle overrides the base filter, but only while there is a route to
+     narrow to — otherwise turning it on would empty the scene. */
+  const markerMode = routeOnly ? 'route' : baseMarkerMode;
   const graph = useMemo(
     () => buildGraphData(locations, connections, { route, mode: markerMode, selectedId }),
     [locations, connections, route, markerMode, selectedId]
@@ -163,6 +168,11 @@ export default function WorldCanvas() {
   useEffect(() => {
     viewRef.current?.setLabelDistance(labelDistance);
   }, [labelDistance]);
+
+  useEffect(() => {
+    /* Live, so dragging the slider during a tour changes the speed under way. */
+    viewRef.current?.setTourSpeed(tourSpeed);
+  }, [tourSpeed]);
 
   useEffect(() => {
     /* At the top of its range the slider means "no limit", which is cheaper as

@@ -24,6 +24,14 @@ export interface MarkerDatum {
    * ordinary case, which is most markers most of the time.
    */
   ring?: string;
+  /**
+   * Exempt from the distance cull.
+   *
+   * Set for the stops of a planned route: the route is the whole subject of the
+   * picture when one is up, and a path that fades out halfway along is worse
+   * than no path at all.
+   */
+  pinned?: boolean;
   /** Block coordinates. The marker is centred in the block. */
   x: number;
   y: number;

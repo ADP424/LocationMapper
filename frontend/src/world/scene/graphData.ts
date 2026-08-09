@@ -154,13 +154,14 @@ function dim(css: string): string {
 export type MarkerMode = 'all' | 'route' | 'selected';
 
 /**
- * `route` is the default, and doubles as the automatic behaviour: with no plan
- * there is nothing to narrow to, so it shows everything. Planning a trip is
- * therefore enough to clear the map down to the path, without also having to
- * come over here and say so.
+ * The base filter, chosen from a list.
+ *
+ * `route` is not in here: narrowing to a planned trip is a toggle of its own
+ * that overrides whichever of these is chosen, because wanting to see the map
+ * around a route and wanting to see only the route are both reasonable and the
+ * user switches between them far more often than between these.
  */
-export const MARKER_MODE_LABELS: Record<MarkerMode, string> = {
-  route: 'The Planned Route, When There Is One',
+export const MARKER_MODE_LABELS: Record<Exclude<MarkerMode, 'route'>, string> = {
   all: 'Everything',
   selected: 'Selected And Its Connections'
 };
@@ -208,8 +209,8 @@ export function buildGraphData(
 ): GraphData {
   const route = options.route ?? null;
   const allowed = allowedIds(locations, connections, options);
-  /* Showing the route and nothing else: its names are then the whole point of
-     the picture, so none of them may be dropped for being far away. */
+  /* Showing the route and nothing else: every marker left is part of the path,
+     so none of them may be dropped for being far away. */
   const routeOnly = options.mode === 'route' && route !== null;
 
   const markers: MarkerDatum[] = [];
@@ -232,6 +233,9 @@ export function buildGraphData(
       /* A ring is how a waypoint says which kind of stop it is; the marker
          keeps its own colour underneath so the map still reads normally. */
       ring: onRoute && role ? ROLE_COLORS[role] : undefined,
+      /* The route outranks the distance slider: it is what the user asked to
+         see, and half a path is not a route. */
+      pinned: routeOnly,
       ...at
     });
     labels.push({
@@ -239,7 +243,11 @@ export function buildGraphData(
       text: location.name || 'Untitled',
       color: onRoute ? own : dim(own),
       dim: !onRoute,
-      pinned: routeOnly,
+      /* Names are not pinned the way markers are. A marker that vanishes breaks
+         the path; a name that vanishes is just less clutter, and on a long
+         route the names are the clutter. So the slider still governs these —
+         put it at Unlimited to read every stop at once. */
+      pinned: false,
       ...at
     });
   }

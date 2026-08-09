@@ -19,6 +19,7 @@ import { buildGraphData, isPlaced, placedAt, routeHighlight, routeOrder } from '
 import { EdgeLayer } from '../src/world/scene/edges';
 import { MarkerLayer } from '../src/world/scene/markers';
 import { blockInFrontOf } from '../src/world/scene/pick';
+import { TOUR_MIN_RATE, tourRate, tourStep } from '../src/world/scene/tour';
 import type { Connection, Location } from '../src/types';
 
 let failures = 0;
@@ -433,20 +434,26 @@ check(
 );
 
 check(
-  'route mode pins its labels past the distance cull',
-  routeOnly.labels.every((l) => l.pinned === true),
-  'a path that goes anonymous halfway along is not a path'
+  'route mode pins its markers past the distance cull',
+  routeOnly.markers.every((m) => m.pinned === true),
+  'a path that fades out halfway along is not a path'
 );
 check(
-  'no other mode pins labels',
-  buildGraphData(locations, connections, { route: trip }).labels.every((l) => !l.pinned)
+  'no other mode pins markers',
+  buildGraphData(locations, connections, { route: trip }).markers.every((m) => !m.pinned)
 );
 check(
   'route mode with no plan pins nothing',
-  buildGraphData(locations, connections, { route: null, mode: 'route' }).labels.every(
-    (l) => !l.pinned
+  buildGraphData(locations, connections, { route: null, mode: 'route' }).markers.every(
+    (m) => !m.pinned
   ),
-  'there is no route to keep readable'
+  'there is no route to keep on screen'
+);
+check(
+  'names are never pinned, in any mode',
+  routeOnly.labels.every((l) => !l.pinned) &&
+    buildGraphData(locations, connections, { route: trip }).labels.every((l) => !l.pinned),
+  'the label distance slider stays in charge of names'
 );
 
 check(
@@ -566,6 +573,61 @@ check(
   ordered.length === 3 && ordered[0] === 'a' && ordered[2] === 'c',
   'plan.locationIds has no order and cannot be flown along'
 );
+
+/* ------------------------------------------------------- tour speed */
+
+heading('Tour speed weight');
+
+const LEN = 500;
+const DT = 1 / 60;
+
+check(
+  'the weight scales the step exactly',
+  Math.abs(tourStep(0.5, DT, LEN, 2) - 2 * tourStep(0.5, DT, LEN, 1)) < 1e-12,
+  '200% is twice the distance per frame'
+);
+
+check(
+  'and scales down the same way',
+  Math.abs(tourStep(0.5, DT, LEN, 0.5) - 0.5 * tourStep(0.5, DT, LEN, 1)) < 1e-12,
+  '50% is half'
+);
+
+check(
+  'weights compose with the base speed, not with each other',
+  Math.abs(tourStep(0.5, DT, LEN, 4) - 2 * tourStep(0.5, DT, LEN, 2)) < 1e-12,
+  '400% is twice 200%'
+);
+
+/* The ease ramp must survive the weight — a faster tour is the same journey
+   played faster, not a differently shaped one. */
+const shapeHolds = [0, 0.02, 0.05, 0.3, 0.5, 0.8, 0.97, 1].every((u) => {
+  const slow = tourStep(u, DT, LEN, 1);
+  const fast = tourStep(u, DT, LEN, 3);
+  return slow === 0 ? fast === 0 : Math.abs(fast / slow - 3) < 1e-12;
+});
+check('the ease shape is unchanged at every point', shapeHolds, 'ratio is 3 all along');
+
+check(
+  'the ends are slower than the middle',
+  tourRate(0) < tourRate(0.5) && tourRate(1) < tourRate(0.5),
+  'the tour still pulls away and settles'
+);
+
+check(
+  'the ramp never stalls',
+  tourRate(0) >= TOUR_MIN_RATE && tourRate(0) > 0,
+  'a rate of zero would park the camera at the start forever'
+);
+
+check(
+  'a default weight leaves the old behaviour alone',
+  tourStep(0.5, DT, LEN) === tourStep(0.5, DT, LEN, 1),
+  'omitting the weight is 100%'
+);
+
+/* Long routes must not divide by a zero length. */
+check('a zero-length route does not divide by zero', Number.isFinite(tourStep(0, DT, 0, 1)));
 
 /* ---------------------------------------------------------- teardown */
 
