@@ -16,6 +16,9 @@ export interface EdgeDatum {
   id: string;
   color: string;
   dashed: boolean;
+  /** Ids of the two ends, so a filter can tell whether both are on screen. */
+  sourceId: string;
+  targetId: string;
   /** Block coordinates of each end. */
   a: { x: number; y: number; z: number };
   b: { x: number; y: number; z: number };
@@ -57,18 +60,39 @@ export class EdgeLayer {
   private dashed: Pass | null = null;
   private readonly colour = new THREE.Color();
 
+  private data: EdgeDatum[] = [];
+  private visibleIds: Set<string> | null = null;
+
   constructor() {
     this.group.name = 'connections';
   }
 
   setData(edges: EdgeDatum[]) {
+    this.data = edges;
+    this.refill();
+  }
+
+  /**
+   * Draw only connections with both ends among these locations, or all of them
+   * with null. Both ends, because a line to a marker that is not being drawn
+   * points at nothing and reads as a wrong edge rather than a hidden one.
+   */
+  setVisible(ids: Set<string> | null) {
+    this.visibleIds = ids;
+    this.refill();
+  }
+
+  private refill() {
+    const shown = this.visibleIds
+      ? this.data.filter((e) => this.visibleIds!.has(e.sourceId) && this.visibleIds!.has(e.targetId))
+      : this.data;
     this.fill(
       'solid',
-      edges.filter((e) => !e.dashed)
+      shown.filter((e) => !e.dashed)
     );
     this.fill(
       'dashed',
-      edges.filter((e) => e.dashed)
+      shown.filter((e) => e.dashed)
     );
   }
 

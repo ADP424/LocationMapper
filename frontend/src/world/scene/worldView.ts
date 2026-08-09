@@ -30,11 +30,41 @@ const SKY = 0x8fb8de;
 /** Pointer travel, in pixels, above which a click is really an orbit drag. */
 const DRAG_SLOP = 4;
 
-/** How far a label stays legible. Blocks. */
-const LABEL_DISTANCE = 220;
+/**
+ * How far a name stays on screen, in blocks — the starting value for a control
+ * the sidebar owns.
+ *
+ * There is no distance that is right for every map. A few dozen rooms want
+ * every name visible from anywhere; several hundred in a maze want almost none
+ * of them, or the screen is a wall of overlapping text. Framing a large map
+ * puts the camera further out than this, which is why the names vanish when you
+ * zoom all the way out and why this had to become adjustable.
+ */
+const DEFAULT_LABEL_DISTANCE = 220;
+
+/** Camera travel, in blocks, before the visible-marker set is recomputed. */
+const MARKER_RECHECK = 4;
 
 /** Camera distance used when framing a single point. */
 const FOCUS_DISTANCE = 42;
+
+/* ------------------------------------------------------------- the tour */
+
+/** Blocks per second along the route. */
+const TOUR_SPEED = 18;
+/** Eye height above the path, so the camera is not inside the floor. */
+const TOUR_LIFT = 2.2;
+/** How far along the curve the camera looks, as a fraction of the whole. */
+const TOUR_LOOK_AHEAD = 0.004;
+/** Fraction of the route spent easing in and out of the cruise speed. */
+const TOUR_EASE = 0.06;
+/** Speed floor, so the ends drift rather than stall. */
+const TOUR_MIN_RATE = 0.15;
+
+const smoothstep = (x: number) => {
+  const t = Math.min(1, Math.max(0, x));
+  return t * t * (3 - 2 * t);
+};
 
 export interface GraphData {
   markers: MarkerDatum[];
@@ -52,6 +82,8 @@ export interface WorldViewOptions {
   onPickBlock?(x: number, y: number, z: number): void;
   /** Nothing was under the pointer. */
   onPickNothing?(): void;
+  /** The route tour started or stopped (including on reaching the end). */
+  onTourChange?(touring: boolean): void;
   /** The gizmo moved the selected marker to a new block. */
   onDragCoords?(id: string, x: number, y: number, z: number): void;
 }
@@ -80,10 +112,21 @@ export class WorldView {
   private dimension: DimensionRef | null = null;
   private radius = 12;
 
+  private graph: GraphData | null = null;
+  private markerDistance: number | null = null;
+  private readonly markerCentre = new THREE.Vector3(NaN, NaN, NaN);
+
+  private tour: THREE.CatmullRomCurve3 | null = null;
+  private tourLength = 0;
+  private tourU = 0;
+  private readonly tourAt = new THREE.Vector3();
+  private readonly tourLook = new THREE.Vector3();
+
   private selection: string | null = null;
   private gizmoEnabled = true;
   private dragging = false;
   private labelsVisible = true;
+  private labelDistance = DEFAULT_LABEL_DISTANCE;
   private lastFrame = performance.now();
   private disposed = false;
 
@@ -212,10 +255,31 @@ export class WorldView {
   /* --------------------------------------------------------------- graph */
 
   setGraph(data: GraphData) {
+    this.graph = data;
     this.markers.setData(data.markers);
     this.edges.setData(data.edges);
     this.labels.setData(data.labels);
+    this.applyVisibility(true);
     this.applyGizmo();
+  }
+
+  /**
+   * Draw only markers within this many blocks of the camera, or all of them
+   * with null.
+   *
+   * The counterpart of the label distance, and the same idea: past some range
+   * a marker is a speck that only adds to the clutter. It composes with the
+   * mode rather than replacing it — "on the route, and near me" is a reasonable
+   * thing to ask for.
+   *
+   * The other ways of thinning the map out are decided once per edit in
+   * `buildGraphData`. This one cannot be: it changes as the camera moves, so it
+   * is recomputed here, and only when the camera has actually gone somewhere.
+   */
+  setMarkerDistance(blocks: number | null) {
+    if (blocks === this.markerDistance) return;
+    this.markerDistance = blocks;
+    this.applyVisibility(true);
   }
 
   setSelection(id: string | null) {
@@ -233,6 +297,11 @@ export class WorldView {
 
   setLabelsVisible(visible: boolean) {
     this.labelsVisible = visible;
+  }
+
+  /** How far a name stays on screen, in blocks. */
+  setLabelDistance(blocks: number) {
+    this.labelDistance = blocks;
   }
 
   /* ---------------------------------------------------------- navigation */
@@ -258,6 +327,29 @@ export class WorldView {
     this.streamer?.update(this.camera.position);
   }
 
+  /** Frame one location. False if it has no coordinates. */
+  focusLocation(id: string): boolean {
+    const at = this.markers.positionOf(id);
+    if (!at) return false;
+    this.focusOn(at.x, at.y, at.z);
+    return true;
+  }
+
+  /**
+   * Frame a subset of the map — the planned route, in practice.
+   *
+   * Ids that are not placed are skipped rather than refused: a route through
+   * one room with no coordinates is still worth framing around the rest.
+   */
+  fitToLocations(ids: string[]): boolean {
+    const placed: MarkerDatum[] = [];
+    for (const id of ids) {
+      const at = this.markers.positionOf(id);
+      if (at) placed.push({ id, color: '', x: at.x - 0.5, y: at.y - 0.5, z: at.z - 0.5 });
+    }
+    return this.frameGraph(placed);
+  }
+
   /** Frame every marker at once. No-op when nothing is placed. */
   frameGraph(markers: MarkerDatum[]): boolean {
     if (!markers.length) return false;
@@ -280,7 +372,62 @@ export class WorldView {
     return true;
   }
 
+  /**
+   * Fly the camera along a route, start to end, in one continuous move.
+   *
+   * The stops are the control points of a Catmull-Rom curve rather than a
+   * polyline, so the camera banks through corners instead of snapping at every
+   * room, and `getPointAt` walks it by arc length, so the speed is the same in
+   * a dense cluster of rooms as it is across a long corridor.
+   *
+   * Returns false when there is not enough of a route to fly along.
+   */
+  startTour(points: Array<{ x: number; y: number; z: number }>): boolean {
+    /* A route that doubles back through a room it already visited repeats a
+       point; a zero-length segment makes the curve's tangent undefined and the
+       camera spin on the spot. */
+    const path: THREE.Vector3[] = [];
+    for (const p of points) {
+      const v = new THREE.Vector3(p.x + 0.5, p.y + 0.5, p.z + 0.5);
+      if (!path.length || path[path.length - 1].distanceToSquared(v) > 1e-6) path.push(v);
+    }
+    if (path.length < 2) return false;
+
+    this.stopTour(false);
+    this.tour = new THREE.CatmullRomCurve3(path, false, 'catmullrom', 0.5);
+    this.tourLength = Math.max(this.tour.getLength(), 1);
+    this.tourU = 0;
+
+    /* The tour owns the camera while it runs. */
+    this.fly.exit();
+    this.orbit.enabled = false;
+    this.applyGizmo();
+    this.options.onTourChange?.(true);
+    return true;
+  }
+
+  stopTour(notify = true) {
+    if (!this.tour) return;
+    this.tour = null;
+    this.orbit.enabled = !this.fly.active;
+    /* Leave the orbit target where the camera ended up looking, or the view
+       jumps back to wherever it was before the tour started. */
+    const ahead = new THREE.Vector3();
+    this.camera.getWorldDirection(ahead);
+    this.orbit.target.copy(this.camera.position).addScaledVector(ahead, 24);
+    this.orbit.update();
+    this.applyGizmo();
+    if (notify) this.options.onTourChange?.(false);
+  }
+
+  get touring(): boolean {
+    return this.tour !== null;
+  }
+
   enterFly() {
+    /* Taking the controls ends the tour — two things steering one camera is
+       not a thing that can be resolved sensibly. */
+    this.stopTour();
     this.fly.enter();
   }
 
@@ -348,6 +495,9 @@ export class WorldView {
 
   private readonly onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0 || this.dragging) return;
+    /* Touching the canvas takes the camera back — a tour you cannot escape by
+       grabbing the view is a trap. */
+    this.stopTour();
     this.pressAt = { x: e.clientX, y: e.clientY };
   };
 
@@ -444,17 +594,54 @@ export class WorldView {
     this.lastFrame = now;
 
     this.resize();
-    if (this.fly.active) this.fly.update(dt);
+    if (this.tour) this.advanceTour(dt);
+    else if (this.fly.active) this.fly.update(dt);
     else this.orbit.update();
 
-    /* Orbiting loads around what you are looking at; flying loads around you. */
-    this.streamer?.update(this.fly.active ? this.camera.position : this.orbit.target);
+    /* Orbiting loads around what you are looking at; flying — or touring —
+       loads around you. */
+    this.streamer?.update(
+      this.fly.active || this.tour ? this.camera.position : this.orbit.target
+    );
 
-    this.labels.cull(this.camera, this.labelsVisible ? LABEL_DISTANCE : 0);
+    this.applyVisibility();
+    this.labels.cull(this.camera, this.labelsVisible ? this.labelDistance : 0);
 
     this.renderer.render(this.scene, this.camera);
     this.labelRenderer.render(this.scene, this.camera);
   };
+
+  /**
+   * Move the camera one frame along the tour.
+   *
+   * Progress is in arc length, so `dt * speed / length` is genuinely constant
+   * ground speed, ramped down at both ends so the tour pulls away and settles
+   * rather than starting and stopping at full tilt.
+   */
+  private advanceTour(dt: number) {
+    if (!this.tour) return;
+
+    const rate =
+      TOUR_MIN_RATE +
+      (1 - TOUR_MIN_RATE) *
+        smoothstep(this.tourU / TOUR_EASE) *
+        smoothstep((1 - this.tourU) / TOUR_EASE);
+    this.tourU += ((TOUR_SPEED * dt) / this.tourLength) * rate;
+
+    if (this.tourU >= 1) {
+      /* Land on the final stop before handing the camera back, so the tour
+         ends looking at its destination rather than just short of it. */
+      this.tour.getPointAt(1, this.tourAt);
+      this.camera.position.set(this.tourAt.x, this.tourAt.y + TOUR_LIFT, this.tourAt.z);
+      this.stopTour();
+      return;
+    }
+
+    this.tour.getPointAt(this.tourU, this.tourAt);
+    this.tour.getPointAt(Math.min(1, this.tourU + TOUR_LOOK_AHEAD), this.tourLook);
+    this.camera.position.set(this.tourAt.x, this.tourAt.y + TOUR_LIFT, this.tourAt.z);
+    this.camera.lookAt(this.tourLook.x, this.tourLook.y + TOUR_LIFT, this.tourLook.z);
+  }
 
   private resize() {
     const w = this.canvas.clientWidth;
@@ -480,6 +667,43 @@ export class WorldView {
 
   /* ------------------------------------------------------------ internals */
 
+  /**
+   * Recompute which markers are near enough to draw.
+   *
+   * Throttled on distance rather than time: the set only changes when the
+   * camera moves, and re-testing several hundred markers every frame to
+   * discover that nothing changed is the kind of cost that shows up as a
+   * mysterious few frames per second on a big map.
+   */
+  private applyVisibility(force = false) {
+    if (this.markerDistance === null) {
+      if (force || !Number.isNaN(this.markerCentre.x)) {
+        this.markerCentre.set(NaN, NaN, NaN);
+        this.markers.setVisible(null);
+        this.edges.setVisible(null);
+        this.labels.setVisible(null);
+      }
+      return;
+    }
+
+    const centre = this.fly.active ? this.camera.position : this.orbit.target;
+    if (!force && centre.distanceToSquared(this.markerCentre) < MARKER_RECHECK ** 2) return;
+    this.markerCentre.copy(centre);
+
+    const limit = this.markerDistance ** 2;
+    const ids = new Set<string>();
+    for (const m of this.graph?.markers ?? []) {
+      const dx = m.x + 0.5 - centre.x;
+      const dy = m.y + 0.5 - centre.y;
+      const dz = m.z + 0.5 - centre.z;
+      if (dx * dx + dy * dy + dz * dz <= limit) ids.add(m.id);
+    }
+
+    this.markers.setVisible(ids);
+    this.edges.setVisible(ids);
+    this.labels.setVisible(ids);
+  }
+
   private applyFog() {
     const far = this.radius * 16;
     this.scene.fog = new THREE.Fog(SKY, far * 0.55, far * 1.05);
@@ -493,7 +717,7 @@ export class WorldView {
    */
   private applyGizmo() {
     const at = this.selection ? this.markers.positionOf(this.selection) : null;
-    const show = Boolean(at) && this.gizmoEnabled && !this.fly.active;
+    const show = Boolean(at) && this.gizmoEnabled && !this.fly.active && !this.tour;
 
     if (!show) {
       this.gizmo.detach();

@@ -8,6 +8,7 @@
  */
 
 import { create } from 'zustand';
+import type { MarkerMode } from './scene/graphData';
 import {
   fromDirectoryInput,
   fromLocalPath,
@@ -15,7 +16,7 @@ import {
   type DimensionRef,
   type WorldSource
 } from './source/worldSource';
-import { DEFAULT_WORLD_PREF, loadWorldPref, saveWorldPref } from './worldPrefs';
+import { DEFAULT_WORLD_PREF, loadWorldPref, saveWorldPref, type WorldPref } from './worldPrefs';
 
 interface WorldState {
   /** The map these preferences belong to, so a map switch reloads them. */
@@ -27,6 +28,9 @@ interface WorldState {
   root: string;
   dimensionId: string;
   renderDistance: number;
+  markerMode: MarkerMode;
+  markerDistance: number;
+  labelDistance: number;
 
   /** Load the preferences for a map. Cheap enough to call on every render. */
   bind: (mapId: string | null) => void;
@@ -36,11 +40,14 @@ interface WorldState {
   close: () => void;
   setDimensionId: (id: string) => void;
   setRenderDistance: (chunks: number) => void;
+  setMarkerMode: (mode: MarkerMode) => void;
+  setMarkerDistance: (blocks: number) => void;
+  setLabelDistance: (blocks: number) => void;
   setError: (message: string | null) => void;
 }
 
 export const useWorldStore = create<WorldState>()((set, get) => {
-  const remember = (patch: Partial<{ root: string; dimensionId: string; renderDistance: number }>) => {
+  const remember = (patch: Partial<WorldPref>) => {
     const { mapId } = get();
     if (mapId) saveWorldPref(mapId, patch);
   };
@@ -87,6 +94,9 @@ export const useWorldStore = create<WorldState>()((set, get) => {
     root: DEFAULT_WORLD_PREF.root,
     dimensionId: DEFAULT_WORLD_PREF.dimensionId,
     renderDistance: DEFAULT_WORLD_PREF.renderDistance,
+    markerMode: DEFAULT_WORLD_PREF.markerMode,
+    markerDistance: DEFAULT_WORLD_PREF.markerDistance,
+    labelDistance: DEFAULT_WORLD_PREF.labelDistance,
 
     bind: (mapId) => {
       if (mapId === get().mapId) return;
@@ -113,6 +123,21 @@ export const useWorldStore = create<WorldState>()((set, get) => {
     setRenderDistance: (renderDistance) => {
       set({ renderDistance });
       remember({ renderDistance });
+    },
+
+    setMarkerMode: (markerMode) => {
+      set({ markerMode });
+      remember({ markerMode });
+    },
+
+    setMarkerDistance: (markerDistance) => {
+      set({ markerDistance });
+      remember({ markerDistance });
+    },
+
+    setLabelDistance: (labelDistance) => {
+      set({ labelDistance });
+      remember({ labelDistance });
     },
 
     setError: (error) => set({ error })

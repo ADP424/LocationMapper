@@ -13,7 +13,9 @@
 
 import * as THREE from 'three';
 
-import { buildGraphData, isPlaced, placedAt } from '../src/world/scene/graphData';
+import { PALETTE } from '../src/graph/model';
+import type { RoutePlan } from '../src/graph/pathfinding';
+import { buildGraphData, isPlaced, placedAt, routeHighlight, routeOrder } from '../src/world/scene/graphData';
 import { EdgeLayer } from '../src/world/scene/edges';
 import { MarkerLayer } from '../src/world/scene/markers';
 import { blockInFrontOf } from '../src/world/scene/pick';
@@ -273,6 +275,297 @@ check(
 
 edges.setData([]);
 check('an empty set hides the lines rather than drawing junk', !solid.visible && !dashed.visible);
+
+/* ------------------------------------------------------- planned route */
+
+heading('Planned route');
+
+const plan = (patch: Partial<RoutePlan> = {}): RoutePlan => ({
+  mode: 'stops',
+  outcome: 'optimal',
+  stopReason: null,
+  legs: [],
+  ok: true,
+  hops: 1,
+  weight: 1,
+  coordChange: 0,
+  locationIds: [],
+  connectionIds: [],
+  detourIds: [],
+  impossibleLeg: null,
+  statesExplored: 0,
+  elapsedMs: 0,
+  keysRelevant: 0,
+  keysPruned: 0,
+  ...patch
+});
+
+check('no plan means no highlight', routeHighlight(null, []) === null);
+check(
+  'an empty plan is not a highlight',
+  routeHighlight(plan(), ['a', 'b']) === null,
+  'dimming the whole map to show nothing is worse than showing the map'
+);
+
+/* a → b, with c reached only to open a lock: a detour is *on* the route. */
+const withDetour = routeHighlight(
+  plan({ locationIds: ['a', 'c', 'b'], connectionIds: ['ab', 'bc'], detourIds: ['c'] }),
+  ['a', 'b']
+)!;
+
+check(
+  'waypoints take their roles in order',
+  withDetour.roles.get('a') === 'start' && withDetour.roles.get('b') === 'end'
+);
+check('a detour is a stop, not an endpoint', withDetour.roles.get('c') === 'stop');
+
+const roundTrip = routeHighlight(
+  plan({ locationIds: ['a', 'b'], connectionIds: ['ab'] }),
+  ['a', 'b', 'a']
+)!;
+check(
+  'a round trip reads as its start',
+  roundTrip.roles.get('a') === 'start',
+  'the same room is both ends; leaving is the more useful of the two'
+);
+
+/* A shorter route that leaves c out entirely, so there is something off it. */
+const trip = routeHighlight(
+  plan({ locationIds: ['a', 'b'], connectionIds: ['ab'] }),
+  ['a', 'b']
+)!;
+
+const routed = buildGraphData(locations, connections, { route: trip });
+const marker = (id: string) => routed.markers.find((m) => m.id === id)!;
+const edge = (id: string) => routed.edges.find((e) => e.id === id)!;
+
+check('an on-route marker keeps its own colour', marker('a').color === '#ff0000');
+check(
+  'an off-route marker is pushed to the background',
+  marker('c').color !== locations.c.color && marker('c').color.startsWith('#'),
+  `${locations.c.color} → ${marker('c').color}`
+);
+check(
+  'the start is ringed in the start colour',
+  marker('a').ring === PALETTE.routeStart,
+  marker('a').ring
+);
+check('the end is ringed in the end colour', marker('b').ring === PALETTE.routeEnd);
+check('an unrouted marker has no ring', marker('c').ring === undefined);
+
+check('a route edge takes the route colour', edge('ab').color === PALETTE.route, edge('ab').color);
+check(
+  'an off-route edge is dimmed, not recoloured to the route',
+  edge('bc').color !== PALETTE.route && edge('bc').color !== connections.bc.color
+);
+check(
+  'ephemeral stays dashed on the route',
+  edge('bc').dashed === true,
+  'the route must not silently change what a connection is'
+);
+
+check(
+  'off-route labels are marked for dimming',
+  routed.labels.find((l) => l.id === 'c')!.dim === true &&
+    routed.labels.find((l) => l.id === 'a')!.dim !== true
+);
+
+/* With no plan, nothing is dimmed and nothing is ringed — the ordinary case
+   must not pay for the routed one. */
+const plain = buildGraphData(locations, connections);
+check(
+  'without a route every marker is its own colour, unringed',
+  plain.markers.every((m) => m.ring === undefined) &&
+    plain.markers.find((m) => m.id === 'c')!.color === locations.c.color
+);
+check('without a route no label is dimmed', plain.labels.every((l) => l.dim !== true));
+
+/* Rings are packed into their own instanced draw. */
+markers.setData(routed.markers);
+const ringMesh = markers.group.children.filter(
+  (o): o is THREE.InstancedMesh => (o as THREE.InstancedMesh).isInstancedMesh === true
+)[2];
+check(
+  'the ring pass draws only the ringed markers',
+  ringMesh.count === 2,
+  `${ringMesh.count} rings for ${routed.markers.length} markers`
+);
+
+const ringAt = new THREE.Vector3();
+ringMesh.getMatrixAt(0, matrix);
+ringAt.setFromMatrixPosition(matrix);
+check(
+  'a ring sits on its marker',
+  ringAt.distanceTo(markers.positionOf(routed.markers.find((m) => m.ring)!.id)!) < 1e-6
+);
+markers.setData(data.markers);
+
+/* --------------------------------------------------------- visibility */
+
+heading('Thinning a crowded map');
+
+/* Static modes drop things before they ever reach a layer. */
+const routeOnly = buildGraphData(locations, connections, { route: trip, mode: 'route' });
+check(
+  'route mode keeps only the route',
+  routeOnly.markers.map((m) => m.id).sort().join() === 'a,b',
+  routeOnly.markers.map((m) => m.id).join()
+);
+check('and drops edges that lost an end', routeOnly.edges.map((e) => e.id).join() === 'ab');
+check(
+  'route mode drops labels off the route too',
+  routeOnly.labels.map((l) => l.id).sort().join() === 'a,b',
+  'the names are half the clutter'
+);
+
+/* A shortcut joining two rooms the route visits, which the planner declined to
+   take: drawing it makes the path ambiguous. */
+const withShortcut = index([...Object.values(connections), connection('a-b-2', 'a', 'b')]);
+const shortcutRoute = buildGraphData(locations, withShortcut, { route: trip, mode: 'route' });
+check(
+  'route mode draws the route, not every edge between its rooms',
+  shortcutRoute.edges.map((e) => e.id).join() === 'ab',
+  'a shortcut the planner refused must not look like part of the path'
+);
+check(
+  'that shortcut is still drawn when not in route mode',
+  buildGraphData(locations, withShortcut, { route: trip }).edges.some((e) => e.id === 'a-b-2')
+);
+
+check(
+  'route mode pins its labels past the distance cull',
+  routeOnly.labels.every((l) => l.pinned === true),
+  'a path that goes anonymous halfway along is not a path'
+);
+check(
+  'no other mode pins labels',
+  buildGraphData(locations, connections, { route: trip }).labels.every((l) => !l.pinned)
+);
+check(
+  'route mode with no plan pins nothing',
+  buildGraphData(locations, connections, { route: null, mode: 'route' }).labels.every(
+    (l) => !l.pinned
+  ),
+  'there is no route to keep readable'
+);
+
+check(
+  'route mode with no plan shows everything',
+  buildGraphData(locations, connections, { route: null, mode: 'route' }).markers.length === 3,
+  'an empty scene reads as a bug, not as a filter'
+);
+
+const selectedOnly = buildGraphData(locations, connections, { mode: 'selected', selectedId: 'b' });
+check(
+  'selected mode keeps the selection and its neighbours',
+  selectedOnly.markers.map((m) => m.id).sort().join() === 'a,b,c',
+  'b connects to a and c'
+);
+check(
+  'selected mode with nothing selected shows everything',
+  buildGraphData(locations, connections, { mode: 'selected', selectedId: null }).markers.length === 3
+);
+
+/* The radius mode is dynamic, so the layers do the filtering. */
+markers.setData(data.markers);
+const edgeLayer = new EdgeLayer();
+edgeLayer.setData(data.edges);
+
+markers.setVisible(new Set(['a']));
+check('hiding packs the draw down to what is left', instanced.count === 1, `count ${instanced.count}`);
+
+raycaster.set(new THREE.Vector3(-40, 64.5, -19.5), new THREE.Vector3(1, 0, 0));
+check(
+  'picking still resolves the right marker after packing',
+  markers.pick(raycaster)?.id === 'a',
+  'the hit index is a slot, not a data index'
+);
+
+check(
+  'a hidden marker keeps its position',
+  markers.positionOf('b') !== null,
+  'the gizmo and "jump to this" must still work on something off screen'
+);
+
+markers.setSelected('c');
+check(
+  'the selection is shown even when filtered out',
+  instanced.count === 2,
+  `count ${instanced.count} — a and the forced c`
+);
+markers.setSelected(null);
+
+const filteredLines = edgeLayer.group.children as THREE.LineSegments[];
+edgeLayer.setVisible(new Set(['a']));
+check(
+  'an edge with one end hidden is dropped',
+  filteredLines.every((l) => l.geometry.drawRange.count === 0),
+  'a line to a marker that is not drawn points at nothing'
+);
+edgeLayer.setVisible(new Set(['a', 'b']));
+check('an edge with both ends shown is kept', filteredLines[0].geometry.drawRange.count === 2);
+
+markers.setVisible(null);
+check('clearing the filter restores every marker', instanced.count === 3);
+edgeLayer.dispose();
+
+/* ------------------------------------------------------------ the tour */
+
+heading('Route order for the tour');
+
+const leg = (fromId: string, toId: string, hops: string[]) => ({
+  fromId,
+  toId,
+  found: true,
+  steps: hops.map((to, i) => ({
+    connectionId: `s${i}`,
+    fromId: i === 0 ? fromId : hops[i - 1],
+    toId: to,
+    weight: 1,
+    coordChange: 0
+  })),
+  hops: hops.length,
+  weight: hops.length,
+  coordChange: 0,
+  detours: []
+});
+
+check(
+  'no plan is an empty path',
+  routeOrder(null).length === 0,
+  'nothing to fly along'
+);
+
+const ordered = routeOrder(plan({ legs: [leg('a', 'c', ['b', 'c'])] }));
+check(
+  'the path is the walk, in order',
+  ordered.join() === 'a,b,c',
+  ordered.join(),
+);
+
+/* Two legs meeting at a waypoint must not repeat it. */
+const twoLegs = routeOrder(
+  plan({ legs: [leg('a', 'b', ['b']), leg('b', 'd', ['c', 'd'])] })
+);
+check(
+  'legs join without doubling the shared stop',
+  twoLegs.join() === 'a,b,c,d',
+  twoLegs.join()
+);
+
+/* A detour walks back through a room it already passed; the tour should too. */
+const backtrack = routeOrder(plan({ legs: [leg('a', 'a', ['b', 'a'])] }));
+check(
+  'backtracking through a room is kept',
+  backtrack.join() === 'a,b,a',
+  'the walk really does go back that way'
+);
+
+check(
+  'the order is a walk, not the unordered id set',
+  ordered.length === 3 && ordered[0] === 'a' && ordered[2] === 'c',
+  'plan.locationIds has no order and cannot be flown along'
+);
 
 /* ---------------------------------------------------------- teardown */
 

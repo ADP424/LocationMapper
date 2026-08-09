@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { PALETTE } from '../graph/model';
 import { useGraphStore } from '../state/store';
-import { buildGraphData } from '../world/scene/graphData';
+import { buildGraphData, placedAt, routeHighlight, routeOrder } from '../world/scene/graphData';
+import { worldHolder } from '../world/scene/viewHolder';
 import { WorldView } from '../world/scene/worldView';
+import { UNLIMITED } from '../world/worldPrefs';
 import type { StreamStats } from '../world/stream/streamer';
 import { currentDimension, useWorldStore } from '../world/worldStore';
 
@@ -25,6 +28,7 @@ export default function WorldCanvas() {
   const viewRef = useRef<WorldView | null>(null);
 
   const [flying, setFlying] = useState(false);
+  const [touring, setTouring] = useState(false);
   const [stats, setStats] = useState<StreamStats | null>(null);
   const [speed, setSpeed] = useState(1);
 
@@ -34,14 +38,33 @@ export default function WorldCanvas() {
   const mode = useGraphStore((s) => s.mode);
   const placingId = useGraphStore((s) => s.placingId);
   const labelMode = useGraphStore((s) => s.labelMode);
+  const plan = useGraphStore((s) => s.trip.plan);
+  const waypoints = useGraphStore((s) => s.trip.waypoints);
 
   const dimension = useWorldStore(currentDimension);
   const renderDistance = useWorldStore((s) => s.renderDistance);
   const spawn = useWorldStore((s) => s.source?.level?.spawn ?? null);
+  const markerMode = useWorldStore((s) => s.markerMode);
+  const markerDistance = useWorldStore((s) => s.markerDistance);
+  const labelDistance = useWorldStore((s) => s.labelDistance);
 
   const selectedId = selection?.type === 'location' ? selection.id : null;
-  const graph = useMemo(() => buildGraphData(locations, connections), [locations, connections]);
+  const route = useMemo(() => routeHighlight(plan, waypoints), [plan, waypoints]);
+  const graph = useMemo(
+    () => buildGraphData(locations, connections, { route, mode: markerMode, selectedId }),
+    [locations, connections, route, markerMode, selectedId]
+  );
   const placing = placingId ? locations[placingId] : null;
+
+  /* The route in walking order, reduced to the stops that have somewhere to be
+     — an unplaced room is a gap in the path, not a stop on it. */
+  const tourPath = useMemo(
+    () =>
+      routeOrder(plan)
+        .map((id) => (locations[id] ? placedAt(locations[id]) : null))
+        .filter((p): p is NonNullable<typeof p> => p !== null),
+    [plan, locations]
+  );
 
   /* Re-pointed every render: the view is built once and would otherwise hold
      the first render's store values forever. */
@@ -88,14 +111,21 @@ export default function WorldCanvas() {
       onStats: setStats,
       onError: (message) => useGraphStore.getState().setError(message),
       onFlyChange: setFlying,
+      onTourChange: setTouring,
       onPickLocation: (id) => handlers.current.pickLocation(id),
       onPickBlock: (x, y, z) => handlers.current.pickBlock(x, y, z),
       onPickNothing: () => handlers.current.pickNothing(),
       onDragCoords: (id, x, y, z) => handlers.current.dragCoords(id, x, y, z)
     });
     viewRef.current = view;
+    /* Let the sidebar aim this camera the way it aims the Cytoscape one. */
+    worldHolder.view = {
+      focusLocation: (id) => view.focusLocation(id),
+      fitToLocations: (ids) => view.fitToLocations(ids)
+    };
 
     return () => {
+      worldHolder.view = null;
       viewRef.current = null;
       view.dispose();
       /* A drag that ended inside the debounce window would otherwise be lost
@@ -129,6 +159,16 @@ export default function WorldCanvas() {
   useEffect(() => {
     viewRef.current?.setLabelsVisible(labelMode !== 'none');
   }, [labelMode]);
+
+  useEffect(() => {
+    viewRef.current?.setLabelDistance(labelDistance);
+  }, [labelDistance]);
+
+  useEffect(() => {
+    /* At the top of its range the slider means "no limit", which is cheaper as
+       well as clearer: null skips the per-frame distance pass entirely. */
+    viewRef.current?.setMarkerDistance(markerDistance >= UNLIMITED ? null : markerDistance);
+  }, [markerDistance]);
 
   /**
    * Point the camera at something when a world opens.
@@ -198,10 +238,43 @@ export default function WorldCanvas() {
         >
           Fit To Map
         </button>
+        {route && plan && (
+          <button onClick={() => viewRef.current?.fitToLocations(plan.locationIds)}>
+            Fit To Route
+          </button>
+        )}
+        {tourPath.length > 1 && (
+          <button
+            className={touring ? 'active' : ''}
+            onClick={() =>
+              touring ? viewRef.current?.stopTour() : viewRef.current?.startTour(tourPath)
+            }
+            title="Fly the camera along the planned route, start to end"
+          >
+            {touring ? 'Stop Tour' : `Tour The Route (${tourPath.length} Stops)`}
+          </button>
+        )}
         {spawn && (
           <button onClick={() => viewRef.current?.goTo(spawn.x, spawn.y, spawn.z)}>Go To Spawn</button>
         )}
       </div>
+
+      {route && (
+        <div className="world-legend">
+          <div className="row">
+            <span className="dot" style={{ background: PALETTE.routeStart }} /> start
+          </div>
+          <div className="row">
+            <span className="dot" style={{ background: PALETTE.routeStop }} /> stop
+          </div>
+          <div className="row">
+            <span className="dot" style={{ background: PALETTE.routeEnd }} /> end
+          </div>
+          <div className="row">
+            <span className="dash" style={{ background: PALETTE.route }} /> route
+          </div>
+        </div>
+      )}
 
       {stats && (
         <div className="world-stats">
@@ -231,7 +304,9 @@ export default function WorldCanvas() {
       )}
 
       <p className="world-hint">
-        {flying ? (
+        {touring ? (
+          <>touring the route · click the view or press <kbd>F</kbd> to take the camera back</>
+        ) : flying ? (
           <>
             <kbd>W</kbd>
             <kbd>A</kbd>

@@ -416,3 +416,17 @@ button.primary { border-color: var(--accent); color: var(--accent); }
 .world-panel .hit-list li { justify-content: space-between; }
 .world-panel .hit-list li .link { width: auto; }
 .world-panel .hit-list li .link.subtle { flex: 0 0 auto; }
+
+/* route highlight in the 3D view */
+.world-label.dim { opacity: 0.34; }
+.world-legend {
+  position: absolute; left: 12px; top: 12px; z-index: 5;
+  padding: 7px 10px; font-size: 11px; border-radius: 8px;
+  background: #111722dd; border: 1px solid var(--line); backdrop-filter: blur(4px);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.world-legend .row { align-items: center; gap: 7px; color: var(--muted); }
+.world-legend .row > * { flex: 0 0 auto; }
+.world-legend .dot { width: 9px; height: 9px; border-radius: 50%; }
+.world-legend .dash { width: 14px; height: 2px; border-radius: 1px; }
+.world-canvas.flying .world-legend { opacity: 0.35; }

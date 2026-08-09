@@ -17,6 +17,14 @@ export interface LabelDatum {
   id: string;
   text: string;
   color: string;
+  /** Pushed into the background — off the current route. */
+  dim?: boolean;
+  /**
+   * Exempt from the distance cull. Used for the rooms on a planned route: the
+   * point of drawing a path is to read the whole of it at once, and a route
+   * that runs off past the label distance would go anonymous halfway along.
+   */
+  pinned?: boolean;
   x: number;
   y: number;
   z: number;
@@ -32,6 +40,8 @@ interface Entry {
   text: Text;
   colour: string;
   label: string;
+  dim: boolean;
+  pinned: boolean;
 }
 
 export class LabelLayer {
@@ -39,6 +49,7 @@ export class LabelLayer {
 
   private readonly entries = new Map<string, Entry>();
   private selected: string | null = null;
+  private visibleIds: Set<string> | null = null;
 
   constructor() {
     this.group.name = 'labels';
@@ -65,6 +76,12 @@ export class LabelLayer {
         entry.dot.style.background = datum.color;
         entry.colour = datum.color;
       }
+      const dim = datum.dim === true;
+      if (entry.dim !== dim) {
+        entry.element.classList.toggle('dim', dim);
+        entry.dim = dim;
+      }
+      entry.pinned = datum.pinned === true;
       entry.object.position.set(datum.x + 0.5, datum.y + 0.5 + LIFT, datum.z + 0.5);
     }
 
@@ -83,15 +100,29 @@ export class LabelLayer {
     this.applySelection();
   }
 
+  /** Restrict labels to this set of locations, or all of them with null. */
+  setVisible(ids: Set<string> | null) {
+    this.visibleIds = ids;
+  }
+
   /**
    * Hide labels further than `maxDistance` blocks from the camera. A distance
    * of zero hides all of them, which is what the "no labels" mode wants.
+   *
+   * Runs every frame, so the visibility set is applied here too rather than
+   * fighting it for control of `object.visible`.
    */
   cull(camera: THREE.Camera, maxDistance: number) {
     const limit = maxDistance * maxDistance;
-    for (const entry of this.entries.values()) {
+    for (const [id, entry] of this.entries) {
+      const allowed =
+        !this.visibleIds || this.visibleIds.has(id) || id === this.selected;
+      /* `maxDistance` of zero is labels switched off altogether, which even a
+         pinned label has to respect. */
       entry.object.visible =
-        maxDistance > 0 && entry.object.position.distanceToSquared(camera.position) <= limit;
+        allowed &&
+        maxDistance > 0 &&
+        (entry.pinned || entry.object.position.distanceToSquared(camera.position) <= limit);
     }
   }
 
@@ -115,7 +146,7 @@ export class LabelLayer {
        than on top of it. */
     object.center.set(0.5, 1);
 
-    return { object, element, dot, text, colour: '', label: '' };
+    return { object, element, dot, text, colour: '', label: '', dim: false, pinned: false };
   }
 
   private destroy(entry: Entry) {

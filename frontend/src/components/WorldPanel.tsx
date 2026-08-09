@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useGraphStore } from '../state/store';
-import { isPlaced } from '../world/scene/graphData';
+import { isPlaced, MARKER_MODE_LABELS, type MarkerMode } from '../world/scene/graphData';
 import { canPickDirectory } from '../world/source/worldSource';
+import { UNLIMITED } from '../world/worldPrefs';
 import { useWorldStore } from '../world/worldStore';
 
 const DISTANCES = [4, 8, 12, 16, 20, 24];
@@ -37,6 +38,13 @@ export default function WorldPanel() {
   const close = useWorldStore((s) => s.close);
   const setDimensionId = useWorldStore((s) => s.setDimensionId);
   const setRenderDistance = useWorldStore((s) => s.setRenderDistance);
+  const markerMode = useWorldStore((s) => s.markerMode);
+  const markerDistance = useWorldStore((s) => s.markerDistance);
+  const labelDistance = useWorldStore((s) => s.labelDistance);
+  const setMarkerMode = useWorldStore((s) => s.setMarkerMode);
+  const setMarkerDistance = useWorldStore((s) => s.setMarkerDistance);
+  const setLabelDistance = useWorldStore((s) => s.setLabelDistance);
+  const labelMode = useGraphStore((s) => s.labelMode);
 
   const [path, setPath] = useState(savedRoot);
   const dirRef = useRef<HTMLInputElement>(null);
@@ -49,6 +57,7 @@ export default function WorldPanel() {
     [locations]
   );
   const placedCount = Object.keys(locations).length - unplaced.length;
+  const hasPlan = useGraphStore((s) => Boolean(s.trip.plan?.locationIds.length));
 
   const selectedId = selection?.type === 'location' ? selection.id : null;
   const selected = selectedId ? locations[selectedId] : null;
@@ -156,6 +165,55 @@ export default function WorldPanel() {
       </label>
 
       {error && <div className="small err-text">{error}</div>}
+
+      <label className="inline-label">
+        Show Markers
+        <select value={markerMode} onChange={(e) => setMarkerMode(e.target.value as MarkerMode)}>
+          {(Object.keys(MARKER_MODE_LABELS) as MarkerMode[]).map((m) => (
+            <option key={m} value={m}>
+              {MARKER_MODE_LABELS[m]}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* Both apply in every mode, on top of it. Markers and names are separate
+          kinds of clutter — a hundred octahedra still read as a shape, a
+          hundred overlapping names read as nothing — so they get one control
+          each rather than one between them. */}
+      <label className="inline-label">
+        Marker Distance — {markerDistance >= UNLIMITED ? 'Unlimited' : `${markerDistance} Blocks`}
+        <input
+          type="range"
+          min={20}
+          max={UNLIMITED}
+          step={10}
+          value={markerDistance}
+          onChange={(e) => setMarkerDistance(Number(e.target.value))}
+        />
+      </label>
+
+      <label className="inline-label">
+        Label Distance — {labelDistance >= UNLIMITED ? 'Unlimited' : `${labelDistance} Blocks`}
+        <input
+          type="range"
+          min={20}
+          max={UNLIMITED}
+          step={10}
+          value={labelDistance}
+          onChange={(e) => setLabelDistance(Number(e.target.value))}
+        />
+      </label>
+      {labelMode === 'none' && (
+        <p className="small muted">Labels are off in the toolbar — this has no effect until they are on.</p>
+      )}
+
+      {markerMode === 'route' && !hasPlan && (
+        <p className="small muted">No route planned yet — showing everything until there is one.</p>
+      )}
+      {markerMode === 'selected' && !selection && (
+        <p className="small muted">Nothing selected — showing everything until something is.</p>
+      )}
 
       <h3>Placement</h3>
       <p className="small muted">
