@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { cyHolder, focusLocation } from '../graph/cyHolder';
 import { ROUTE_MODE_LABELS, type RouteMode, type RoutePlan } from '../graph/pathfinding';
 import { useGraphStore } from '../state/store';
+import { worldHolder } from '../world/scene/viewHolder';
 import { CheckField } from './fields';
 
 const round = (n: number) => (Math.round(n * 100) / 100).toString();
@@ -52,6 +53,8 @@ export default function TripPlanner() {
   const setTripMode = useGraphStore((s) => s.setTripMode);
   const setTripAxis = useGraphStore((s) => s.setTripAxis);
   const setAutoPlan = useGraphStore((s) => s.setAutoPlan);
+  const routeFocus = useGraphStore((s) => s.settings.routeFocus);
+  const setSettings = useGraphStore((s) => s.setSettings);
   const startPlan = useGraphStore((s) => s.startPlan);
   const cancelPlan = useGraphStore((s) => s.cancelPlan);
   const clearTrip = useGraphStore((s) => s.clearTrip);
@@ -82,8 +85,15 @@ export default function TripPlanner() {
     `Leg ${i + 1} (${name(trip.waypoints[i] ?? '')} → ${name(trip.waypoints[i + 1] ?? '')})`;
 
   const fitRoute = () => {
+    if (!plan) return;
+    /* The 3D canvas frames the same set of rooms; without this the button
+       looked enabled and did nothing at all over there. */
+    if (worldHolder.view) {
+      worldHolder.view.fitToLocations(plan.locationIds);
+      return;
+    }
     const cy = cyHolder.cy;
-    if (!cy || !plan) return;
+    if (!cy) return;
     const wanted = new Set(plan.locationIds);
     const eles = cy.nodes('.location').filter((nd) => wanted.has(nd.id()));
     if (eles.nonempty()) cy.animate({ fit: { eles, padding: 80 } }, { duration: 350 });
@@ -172,6 +182,20 @@ export default function TripPlanner() {
         checked={trip.autoPlan}
         onChange={setAutoPlan}
       />
+
+      {/* Lives here rather than in Settings because it only means anything
+          while a plan is up, and this is where plans are made. */}
+      <CheckField
+        className="center"
+        label="Hide Everything Off The Route"
+        checked={routeFocus}
+        onChange={(v) => setSettings({ routeFocus: v })}
+      />
+      <p className="muted small">
+        {routeFocus
+          ? 'Off-route rooms and connections are removed from the canvas while a trip is planned. The 3D view does the same — change it there under Show Markers.'
+          : 'Off-route rooms and connections are dimmed rather than hidden.'}
+      </p>
 
       {trip.running ? (
         <div className="trip-running">

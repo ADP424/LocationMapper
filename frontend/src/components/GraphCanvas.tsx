@@ -154,14 +154,16 @@ function applyHighlight(
   multi: string[],
   labelMembers: string[] = [],
   route: RoutePlan | null = null,
-  waypoints: string[] = []
+  waypoints: string[] = [],
+  routeFocus = false
 ) {
   cy.batch(() => {
     cy.elements().removeClass(
-      'hl-primary hl-neighbor faded route-node route-edge route-start route-stop route-end'
+      'hl-primary hl-neighbor faded route-hidden route-node route-edge route-start route-stop route-end'
     );
 
-    /* a planned trip owns the view: everything off-route is dimmed */
+    /* a planned trip owns the view: everything off-route is dimmed, or hidden
+       outright when route focus is on */
     if (route && (route.locationIds.length || route.connectionIds.length)) {
       const wantedNodes = new Set(route.locationIds);
       const wantedEdges = new Set(route.connectionIds);
@@ -173,7 +175,18 @@ function applyHighlight(
         .union(nodes.parents())
         .union(routeEles.nodes().parents());
 
-      cy.elements().difference(keep).addClass('faded');
+      if (routeFocus) {
+        /* Rooms, portals, groupings and edges only. The transient helpers
+           (ghost, handle, drop-target) are how the canvas is operated and must
+           survive a plan being on screen — dimming them was harmless, removing
+           them would not be. */
+        cy.nodes('.location, .portal, .group')
+          .union(cy.edges())
+          .difference(keep)
+          .addClass('route-hidden');
+      } else {
+        cy.elements().difference(keep).addClass('faded');
+      }
       nodes.addClass('route-node');
       routeEles.edges().addClass('route-edge');
       routeEles.nodes('.portal').addClass('route-node');
@@ -187,11 +200,17 @@ function applyHighlight(
         n.addClass(i === 0 ? 'route-start' : i === waypoints.length - 1 ? 'route-end' : 'route-stop');
       });
 
-      /* keep whatever is selected readable on top of the route */
+      /* Keep whatever is selected readable on top of the route — and visible.
+         Selecting a room from the search panel while a plan is up would
+         otherwise appear to do nothing at all. */
       if (selection?.type === 'location') {
-        cy.getElementById(selection.id).removeClass('faded').addClass('hl-primary');
+        cy.getElementById(selection.id).removeClass('faded route-hidden').addClass('hl-primary');
       } else if (selection?.type === 'connection') {
-        cy.elements(`[connectionId = "${selection.id}"]`).removeClass('faded').addClass('hl-primary');
+        const sel = cy.elements(`[connectionId = "${selection.id}"]`);
+        /* Its rooms come back too — an edge hanging between two hidden
+           endpoints is drawn by nothing. */
+        sel.union(sel.connectedNodes()).removeClass('faded route-hidden');
+        sel.addClass('hl-primary');
       }
       return;
     }
@@ -342,6 +361,7 @@ export default function GraphCanvas() {
   const settings = useGraphStore((s) => s.settings);
   const routePlan = useGraphStore((s) => s.trip.plan);
   const waypoints = useGraphStore((s) => s.trip.waypoints);
+  const routeFocus = useGraphStore((s) => s.settings.routeFocus);
 
   const labelNames = useMemo(
     () => ({
@@ -691,7 +711,7 @@ export default function GraphCanvas() {
     restack(cy);
     /* new/changed elements need their zoom-compensated sizes */
     applyViewScale(cy, currentScale(), settingsRef.current);
-    applyHighlight(cy, selection, multiSelect, labelMembers, routePlan, waypoints);
+    applyHighlight(cy, selection, multiSelect, labelMembers, routePlan, waypoints, routeFocus);
     if (structural) refreshRendering(cy);
 
     if (fullReset) {
@@ -702,7 +722,7 @@ export default function GraphCanvas() {
         refreshRendering(cy);
       });
     }
-  }, [elements, selection, multiSelect, labelMembers, routePlan, waypoints, mapId]);
+  }, [elements, selection, multiSelect, labelMembers, routePlan, waypoints, routeFocus, mapId]);
 
   /* ------------------------------------------------------ run the layout */
   useEffect(() => {

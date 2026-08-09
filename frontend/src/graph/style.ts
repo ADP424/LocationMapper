@@ -218,6 +218,14 @@ export const graphStyle: any[] = [
   { selector: '.faded', style: { opacity: 0.18, 'text-opacity': 0.12 } },
   { selector: 'node.group.faded', style: { opacity: 0.35 } },
 
+  /* Route focus: off-route elements are taken out of the picture entirely.
+     `display: none` rather than `visibility: hidden` because it also drops them
+     out of hit-testing and out of `cy.fit`, which is the point — a route you
+     cannot see should not be something you can click by accident either.
+     Cytoscape hides an edge whose endpoint is hidden, so only nodes need the
+     class for the graph to come apart cleanly. */
+  { selector: '.route-hidden', style: { display: 'none' } },
+
   /* ------------------------------- transient helpers (ghosts, handles) */
   {
     selector: 'node.ghost',

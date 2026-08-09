@@ -7,6 +7,14 @@ export interface Settings {
   sizeCompensation: number;
   /** Let Cytoscape drop labels once they would render very small. */
   hideSmallLabels: boolean;
+  /**
+   * With a trip planned, hide everything off the route instead of dimming it.
+   *
+   * The 3D view has done this since it gained a route (`markerMode: 'route'`);
+   * this is the same idea for the 2D canvas, so a plan means the same thing in
+   * both places.
+   */
+  routeFocus: boolean;
   /** Stop the trip planner after a while instead of searching exhaustively. */
   limitSearchTime: boolean;
   /** Whole seconds. */
@@ -18,6 +26,7 @@ export const DEFAULT_SETTINGS: Settings = {
   constantSize: true,
   sizeCompensation: 0.75,
   hideSmallLabels: true,
+  routeFocus: true,
   limitSearchTime: true,
   searchTimeLimitSeconds: 10
 };
@@ -42,6 +51,7 @@ export function normaliseSettings(s: Partial<Settings> | null | undefined): Sett
       1
     ),
     hideSmallLabels: s?.hideSmallLabels ?? DEFAULT_SETTINGS.hideSmallLabels,
+    routeFocus: s?.routeFocus ?? DEFAULT_SETTINGS.routeFocus,
     limitSearchTime: s?.limitSearchTime ?? DEFAULT_SETTINGS.limitSearchTime,
     searchTimeLimitSeconds: Math.round(
       clamp(Number(s?.searchTimeLimitSeconds ?? DEFAULT_SETTINGS.searchTimeLimitSeconds), 1, 3600)
