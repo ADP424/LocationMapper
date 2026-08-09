@@ -1,7 +1,7 @@
 import cytoscape, { Core, ElementDefinition, NodeSingular } from 'cytoscape';
 import elk from 'cytoscape-elk';
 import fcose from 'cytoscape-fcose';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cyHolder } from '../graph/cyHolder';
 import { buildElements, groupNodeId, isInternalId, parsePortalId, portalEdgeId } from '../graph/elements';
 import { computeCoordinateLayout } from '../graph/coordinateLayout';
@@ -328,6 +328,44 @@ export default function GraphCanvas() {
    */
   const layoutScaleLock = useRef<object | null>(null);
   const settingsRef = useRef(useGraphStore.getState().settings);
+
+  /**
+   * A running layout has to outlive this component.
+   *
+   * `cytoscape-elk` cannot be cancelled — its `stop()` is literally
+   * `return this`, and the `elk.layout(...).then(...)` inside `run()` always
+   * writes positions back through `layoutPositions`. If the core has been
+   * destroyed by the time that lands, the write reaches a torn-down instance
+   * and throws `Cannot read properties of null (reading 'isHeadless')`.
+   *
+   * Unmounting mid-layout used to be rare; switching to the 3D view makes it a
+   * normal thing to do. So a destroy requested during a run is recorded here
+   * and carried out once the run reports back.
+   */
+  const layoutBusyRef = useRef(false);
+  const deferredDestroyRef = useRef<(() => void) | null>(null);
+  const busyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markLayoutIdle = useCallback(() => {
+    if (busyTimerRef.current) {
+      clearTimeout(busyTimerRef.current);
+      busyTimerRef.current = null;
+    }
+    layoutBusyRef.current = false;
+    const destroy = deferredDestroyRef.current;
+    if (!destroy) return;
+    deferredDestroyRef.current = null;
+    /* `layoutstop` is emitted from inside elk's own continuation, which is not
+       finished with the core yet — let it unwind before pulling the rug. */
+    queueMicrotask(destroy);
+  }, []);
+
+  const markLayoutBusy = useCallback(() => {
+    layoutBusyRef.current = true;
+    if (busyTimerRef.current) clearTimeout(busyTimerRef.current);
+    /* A run that never reports back must not hold the core forever. */
+    busyTimerRef.current = setTimeout(markLayoutIdle, LAYOUT_WATCHDOG_MS);
+  }, [markLayoutIdle]);
   /**
    * Which layout produced the arrangement on screen. This is *not* `layout`:
    * persisting a layout's result flips the picker to "Saved Positions", but a
@@ -651,7 +689,10 @@ export default function GraphCanvas() {
       setCyReady(false);
       cyHolder.cy = null;
       cyRef.current = null;
-      cy.destroy();
+      /* Deferred rather than immediate while a layout is in flight — see
+         `layoutBusyRef`. The core is already unreachable to everything else. */
+      if (layoutBusyRef.current) deferredDestroyRef.current = () => cy.destroy();
+      else cy.destroy();
     };
   }, []);
 
@@ -831,9 +872,11 @@ export default function GraphCanvas() {
          which looks exactly like the wheel suddenly got more sensitive */
       watchdog = setTimeout(release, LAYOUT_WATCHDOG_MS);
 
+      markLayoutBusy();
       const run = cy.layout(layoutOptions(layout, metrics));
       run.one('layoutstop', () => {
         release();
+        markLayoutIdle();
         if (cancelled) return;
         rebaseStubOffsets(cy);
         restack(cy); // areas are final now that every room has landed
@@ -850,21 +893,28 @@ export default function GraphCanvas() {
       };
     }
 
+    markLayoutBusy();
     (async () => {
-      const positions = await computeGroupedLayout(cy, layout);
-      if (cancelled || !positions.size) return;
-      cy.batch(() => {
-        positions.forEach((p, id) => {
-          const n = cy.getElementById(id);
-          if (n.nonempty() && !n.hasClass('group')) n.position(p);
+      try {
+        const positions = await computeGroupedLayout(cy, layout);
+        if (cancelled || !positions.size) return;
+        cy.batch(() => {
+          positions.forEach((p, id) => {
+            const n = cy.getElementById(id);
+            if (n.nonempty() && !n.hasClass('group')) n.position(p);
+          });
         });
-      });
-      restack(cy); // areas are final now that every room has landed
-      fitAndRescale(cy, 70);
-      rebaseStubOffsets(cy);
-      refreshRendering(cy);
-      const snap = snapshot();
-      void useGraphStore.getState().persistLayoutPositions(snap.positions, snap.portalOffsets);
+        restack(cy); // areas are final now that every room has landed
+        fitAndRescale(cy, 70);
+        rebaseStubOffsets(cy);
+        refreshRendering(cy);
+        const snap = snapshot();
+        void useGraphStore.getState().persistLayoutPositions(snap.positions, snap.portalOffsets);
+      } finally {
+        /* The grouped path runs layouts too, so it holds the core the same way
+           the ELK branch does — and must hand it back however it exits. */
+        markLayoutIdle();
+      }
     })();
 
     return () => {
