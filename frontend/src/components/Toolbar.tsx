@@ -4,7 +4,7 @@ import type { LabelMode } from '../graph/elements';
 import { LAYOUT_GROUPS, LAYOUT_LABELS, LayoutName } from '../graph/layouts';
 import { DIRECTION_OPTIONS, type Direction } from '../graph/model';
 import { useGraphStore } from '../state/store';
-import { CheckField } from './fields';
+import { CheckField, Help } from './fields';
 
 export default function Toolbar() {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -23,6 +23,8 @@ export default function Toolbar() {
   const mapId = useGraphStore((s) => s.mapId);
   const busy = useGraphStore((s) => s.busy);
   const openSettings = useGraphStore((s) => s.openSettings);
+  const showGrid = useGraphStore((s) => s.settings.showCoordinateGrid);
+  const setSettings = useGraphStore((s) => s.setSettings);
 
   const disabled = !mapId;
 
@@ -102,6 +104,17 @@ export default function Toolbar() {
         <button disabled={disabled} onClick={() => fitGraph()}>
           Fit
         </button>
+        <CheckField
+          label={
+            <>
+              Grid
+              <Help text="Draws the coordinate lattice behind an X/Y, X/Z or Y/Z arrangement — one line per coordinate up close, coarsening as you zoom out, numbers along the top and left edges. Run a coordinate layout to see it." />
+            </>
+          }
+          checked={showGrid}
+          disabled={disabled}
+          onChange={(v) => setSettings({ showCoordinateGrid: v })}
+        />
       </div>
 
       <div className="toolbar-group">

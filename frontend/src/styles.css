@@ -12,6 +12,9 @@
   /* light canvas so the graph contrasts with the dark chrome */
   --canvas-1: #f3f6fb;
   --canvas-2: #e4eaf4;
+  /* …so the coordinate lattice is dark ink on it, not light */
+  --grid-line: #243244;
+  --grid-text: #33415c;
   font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
   color-scheme: dark;
 }
@@ -119,9 +122,27 @@ ul { list-style: none; margin: 0; padding: 0; }
   background: radial-gradient(circle at 35% 20%, var(--canvas-1) 0%, var(--canvas-2) 100%);
 }
 .cy-host { position: absolute; inset: 0; }
-/* Cytoscape's own canvases are transparent and come later in the DOM, so this
-   paints underneath every node, edge and label without any z-index at all. */
-.group-shape-layer { position: absolute; inset: 0; pointer-events: none; }
+/* Cytoscape's own canvases are transparent and come later in the DOM, so the
+   grouping bodies paint underneath every node, edge and label without any
+   z-index at all. The lattice goes deeper still; its numbers are a ruler, and
+   go above the graph — see CoordinateGridLayer.
+
+   `width`/`height` are load-bearing. A <canvas> is a *replaced* element: with
+   `width:auto`, `inset:0` resolves to its intrinsic size — the backing store,
+   read as CSS pixels — and `right`/`bottom` are discarded as over-constrained.
+   On a 2× display that silently made every overlay twice the size of the graph
+   it sits on, so every body was drawn at twice its correct position and scale.
+   Never let a canvas size itself. */
+.group-shape-layer,
+.coord-grid-layer,
+.coord-grid-ruler {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
 .graph-canvas.mode-add-location .cy-host { cursor: crosshair; }
 .graph-canvas.mode-connect .cy-host { cursor: alias; }
 .canvas-hint {

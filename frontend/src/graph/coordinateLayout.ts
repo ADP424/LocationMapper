@@ -76,6 +76,27 @@ const ALL_AXES: Axis[] = ['x', 'y', 'z'];
 export const offPlaneAxis = (plane: CoordinatePlane): Axis =>
   ALL_AXES.find((a) => a !== PLANE_AXES[plane].h && a !== PLANE_AXES[plane].v)!;
 
+/**
+ * The one mapping between a coordinate pair and model space — used by the
+ * layout that *places* the rooms and by the grid that *draws* the lattice, so
+ * the two can never disagree about where coordinate (3, -1) is. Screen Y grows
+ * downward, so a larger vertical coordinate sits higher.
+ */
+export const coordToModel = (h: number, v: number, unit: number) => ({ x: h * unit, y: -v * unit });
+export const modelToCoord = (x: number, y: number, unit: number) => ({ h: x / unit, v: -y / unit });
+
+/**
+ * The lattice an arrangement was actually laid out on. Captured by the layout
+ * runner, not derived from the settings: the user may pin a different
+ * `coordinateUnit` without re-laying out, and the grid must keep describing
+ * where the rooms really are.
+ */
+export interface CoordinateFrame {
+  plane: CoordinatePlane;
+  /** Model pixels per one coordinate step — identical on both axes. */
+  unit: number;
+}
+
 export function formatCoordinates(c: LocationCoords): string {
   if (c.coordX === null && c.coordY === null && c.coordZ === null) return '';
   const part = (v: number | null) => (v === null ? '—' : String(v));
@@ -333,12 +354,10 @@ export function computeCoordinateLayout(
   let maxX = -Infinity;
 
   for (const c of cells) {
-    const cx = c.h * unit;
-    /* screen Y grows downward, so a larger coordinate sits higher */
-    const cyPos = -c.v * unit;
+    const origin = coordToModel(c.h, c.v, unit);
     for (const o of c.offsets) {
       const s = size.get(o.id)!;
-      const p = { x: cx + o.dx, y: cyPos + o.dy };
+      const p = { x: origin.x + o.dx, y: origin.y + o.dy };
       positions.set(o.id, p);
       boxes.set(o.id, index.insert({ x: p.x, y: p.y, w: s.w, h: s.h }));
       minY = Math.min(minY, p.y);

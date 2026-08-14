@@ -97,6 +97,11 @@ export function useLayoutRunner(handle: CanvasHandle | null, layout: LayoutName,
       });
       rebaseStubOffsets(cy);
       finish(70); // off-plane coordinate order (restack reads layeringSourceRef)
+      /* The grid draws the lattice the rooms were *actually* placed on, so it
+         records the unit this run resolved — not `settings.coordinateUnit`,
+         which the user can re-pin without re-laying out. It survives the flip
+         to "Saved Positions" for the same reason. */
+      useGraphStore.getState().setCoordinateFrame({ plane, unit: result.unit });
 
       /* the field shows what the last re-layout actually used, so keep it
          live while automatic — the user's own pinned value must not drift */
@@ -119,6 +124,11 @@ export function useLayoutRunner(handle: CanvasHandle | null, layout: LayoutName,
         );
       return;
     }
+
+    /* Any other engine scatters the rooms off the lattice, so there is no
+       longer a grid to draw. "Saved Positions" is exempt: it re-applies the
+       very positions a coordinate run just persisted. */
+    useGraphStore.getState().setCoordinateFrame(null);
 
     const hasGroups = cy.nodes('.group').nonempty();
 

@@ -4,6 +4,7 @@ import { useGraphStore } from '../state/store';
 import { pushEscapeHandler } from '../utils/escapeStack';
 import GraphScrollbars from './GraphScrollbars';
 import MenuPanel from './Menu';
+import CoordinateGridLayer, { CoordinateGridRuler } from './canvas/CoordinateGridLayer';
 import { useCanvasEvents } from './canvas/useCanvasEvents';
 import { useCanvasSettings } from './canvas/useCanvasSettings';
 import { useConnectGhost } from './canvas/useConnectGhost';
@@ -45,6 +46,7 @@ export default function GraphCanvas() {
   const pendingSource = useGraphStore((s) => s.pendingSource);
   const mapId = useGraphStore((s) => s.mapId);
   const settings = useGraphStore((s) => s.settings);
+  const coordinateFrame = useGraphStore((s) => s.coordinateFrame);
   const routePlan = useGraphStore((s) => s.trip.plan);
   const waypoints = useGraphStore((s) => s.trip.waypoints);
   const pick = useGraphStore((s) => s.pick);
@@ -102,6 +104,10 @@ export default function GraphCanvas() {
     ]
   );
 
+  /* one switch for both halves: off, or nothing laid out on a lattice, means
+     neither canvas ever subscribes to the render loop */
+  const gridFrame = settings.showCoordinateGrid ? coordinateFrame : null;
+
   useElementSync(handle, elements, mapId);
   usePortalFollow(handle, elements);
   useCanvasEvents(handle);
@@ -149,8 +155,11 @@ export default function GraphCanvas() {
       onContextMenu={(e) => e.preventDefault()}
     >
       {/* behind the Cytoscape canvases, by DOM order — see GroupShapeLayer */}
+      <CoordinateGridLayer handle={handle} frame={gridFrame} settings={settings} />
       <GroupShapeLayer handle={handle} />
       <div ref={containerRef} className="cy-host" />
+      {/* …and the ruler above them, or a room at the edge would hide it */}
+      <CoordinateGridRuler handle={handle} frame={gridFrame} settings={settings} />
       {handle && <GraphScrollbars />}
       {marquee && (
         <div

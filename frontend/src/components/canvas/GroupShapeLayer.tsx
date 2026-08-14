@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { bodyBounds, hitGroupBody, type GroupBody } from '../../graph/groupRegions';
 import type { Pt } from '../../graph/groupShape';
 import { PALETTE } from '../../graph/model';
+import { applyViewTransform, createOverlaySurface, type OverlayView } from './overlayCanvas';
 import type { CanvasHandle } from './handle';
 
 /**
@@ -31,7 +32,9 @@ import type { CanvasHandle } from './handle';
  *
  * Geometry is recomputed only when it can have changed; the paint runs on
  * Cytoscape's `render` event, so it shares the renderer's cadence and its exact
- * pan/zoom — there is no frame in which the two disagree.
+ * pan/zoom — there is no frame in which the two disagree. The *device* geometry
+ * is measured rather than assumed (`overlayCanvas.ts`), so neither do they
+ * disagree about where a CSS pixel is on a high-resolution display.
  */
 export default function GroupShapeLayer({ handle }: { handle: CanvasHandle | null }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -49,12 +52,13 @@ export default function GroupShapeLayer({ handle }: { handle: CanvasHandle | nul
     const bodies = () => handle.groupBodies.get();
 
     /* ------------------------------------------------------------ hit area */
-
     const setHit = (node: NodeSingular, on: boolean) => {
       const want = on ? 1 : 0;
       if (node.data('bodyHit') !== want) node.data('bodyHit', want);
     };
 
+    /* already resolution-independent: client coordinates and the model transform,
+       with no pixel ratio anywhere — which is why the hit boxes never drifted */
     const updateHitAreas = (clientX: number, clientY: number) => {
       if (!container || cy.destroyed()) return;
       const box = container.getBoundingClientRect();
@@ -91,57 +95,47 @@ export default function GroupShapeLayer({ handle }: { handle: CanvasHandle | nul
       updateHitAreas(e.clientX, e.clientY);
     };
     const onPointerDown = (e: PointerEvent) => updateHitAreas(e.clientX, e.clientY);
-
     wrapper.addEventListener('pointermove', onPointerMove, true);
     wrapper.addEventListener('pointerdown', onPointerDown, true);
 
     /* ------------------------------------------------------------- painting */
-
-    const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const w = Math.max(1, Math.round(wrapper.clientWidth * dpr));
-      const h = Math.max(1, Math.round(wrapper.clientHeight * dpr));
-      if (canvas.width === w && canvas.height === h) return;
-      canvas.width = w;
-      canvas.height = h;
-      if (offRef.current) {
-        offRef.current.width = w;
-        offRef.current.height = h;
-      }
-    };
-
-    const draw = () => {
+    /* hoisted, because the surface's invalidate callback is this very function */
+    function draw() {
       if (cy.destroyed()) return;
-      resize();
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+      const view = surface.view();
+      const ctx = canvas!.getContext('2d');
+      if (!view || !ctx) return;
 
-      const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, canvas!.width, canvas!.height);
 
       const list = bodies();
       if (!list.length) return;
 
       const zoom = cy.zoom();
       const pan = cy.pan();
-      const view = (c: CanvasRenderingContext2D) =>
-        c.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * pan.x, dpr * pan.y);
+      const setView = (c: CanvasRenderingContext2D) => applyViewTransform(c, view, zoom, pan);
       const toDevice = (x: number, y: number): Pt => ({
-        x: (x * zoom + pan.x) * dpr,
-        y: (y * zoom + pan.y) * dpr
+        x: (x * zoom + pan.x) * view.sx,
+        y: (y * zoom + pan.y) * view.sy
       });
 
       for (const body of list) {
         const paint = paintOf(body);
         if (paint.alpha <= 0) continue;
-        if (body.style === 'rectangle') drawRect(ctx, body, paint, view);
-        else if (body.loop) drawLoop(ctx, body, paint, { canvas, view, toDevice, offRef });
-        else drawOutline(ctx, body, paint, view);
+        if (body.style === 'rectangle') drawRect(ctx, body, paint, setView);
+        else if (body.loop) {
+          drawLoop(ctx, body, paint, { canvas: canvas!, setView, toDevice, view, zoom, offRef });
+        } else drawOutline(ctx, body, paint, setView);
       }
+
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
-    };
+    }
+
+    /* resizes *and* device-ratio changes both land here; a monitor hop never
+       resizes anything, and would otherwise leave a stale backing store */
+    const surface = createOverlaySurface(canvas, draw);
 
     /* geometry changes: a drag, a layout, an add/remove, a reparent — and
        `mapgraphgeometry`, which the one geometry reset emits after it has settled
@@ -151,12 +145,10 @@ export default function GroupShapeLayer({ handle }: { handle: CanvasHandle | nul
     cy.on('mapgraphgeometry', markDirty);
     cy.on('render', draw);
 
-    const ro = new ResizeObserver(draw);
-    ro.observe(wrapper);
     draw();
 
     return () => {
-      ro.disconnect();
+      surface.destroy();
       wrapper.removeEventListener('pointermove', onPointerMove, true);
       wrapper.removeEventListener('pointerdown', onPointerDown, true);
       cy.off('position', 'node', markDirty);
@@ -192,11 +184,9 @@ function paintOf(body: GroupBody): Paint {
   const n = body.node;
   const skel = !!n.data('skel');
   const highlighted = n.hasClass('hl-primary');
-
   let fillOpacity = (n.data('groupFillOpacity') as number) || 0.2;
   if (skel) fillOpacity = Math.min(0.55, fillOpacity * 1.6);
   if (highlighted) fillOpacity = Math.max(fillOpacity, 0.3);
-
   return {
     fill: (n.data('fill') as string) || PALETTE.groupFill,
     border: highlighted ? PALETTE.highlight : (n.data('border') as string) || PALETTE.groupBorder,
@@ -206,6 +196,8 @@ function paintOf(body: GroupBody): Paint {
     alpha: n.hasClass('route-dim') ? 0.5 : 1
   };
 }
+
+type SetView = (c: CanvasRenderingContext2D) => void;
 
 const traceRings = (ctx: CanvasRenderingContext2D, rings: Pt[][]) => {
   ctx.beginPath();
@@ -227,15 +219,10 @@ const tracePath = (ctx: CanvasRenderingContext2D, pts: Pt[]) => {
 /** A rectangle grouping, painted here now instead of by Cytoscape's compound
  *  node — the rounded corner is the one curve in the whole subsystem, kept
  *  because a hard-cornered box would read as a regression from the original. */
-function drawRect(
-  ctx: CanvasRenderingContext2D,
-  body: GroupBody,
-  paint: Paint,
-  view: (c: CanvasRenderingContext2D) => void
-) {
+function drawRect(ctx: CanvasRenderingContext2D, body: GroupBody, paint: Paint, setView: SetView) {
   const b = body.bounds;
   ctx.save();
-  view(ctx);
+  setView(ctx);
   const r = Math.min(10, (b.x2 - b.x1) / 4, (b.y2 - b.y1) / 4);
   ctx.beginPath();
   ctx.roundRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1, Math.max(0, r));
@@ -255,23 +242,16 @@ function drawRect(
  * straddling fill alpha and all. `evenodd` is what makes a grouping laid out in a
  * ring show the hole in its middle.
  */
-function drawOutline(
-  ctx: CanvasRenderingContext2D,
-  body: GroupBody,
-  paint: Paint,
-  view: (c: CanvasRenderingContext2D) => void
-) {
+function drawOutline(ctx: CanvasRenderingContext2D, body: GroupBody, paint: Paint, setView: SetView) {
   if (!body.rings.length) return;
   ctx.save();
-  view(ctx);
+  setView(ctx);
   ctx.lineJoin = 'miter';
   ctx.miterLimit = 4;
-
   traceRings(ctx, body.rings);
   ctx.globalAlpha = paint.alpha * paint.fillOpacity;
   ctx.fillStyle = paint.fill;
   ctx.fill('evenodd');
-
   ctx.globalAlpha = paint.alpha * paint.borderOpacity;
   ctx.strokeStyle = paint.border;
   ctx.lineWidth = paint.borderWidth;
@@ -281,8 +261,10 @@ function drawOutline(
 
 interface LoopContext {
   canvas: HTMLCanvasElement;
-  view: (c: CanvasRenderingContext2D) => void;
+  setView: SetView;
   toDevice: (x: number, y: number) => Pt;
+  view: OverlayView;
+  zoom: number;
   offRef: { current: HTMLCanvasElement | null };
 }
 
@@ -297,7 +279,6 @@ interface LoopContext {
 function drawLoop(main: CanvasRenderingContext2D, body: GroupBody, paint: Paint, ctxs: LoopContext) {
   const loop = body.loop!;
   const bounds = bodyBounds(body);
-
   const off = (ctxs.offRef.current ??= document.createElement('canvas'));
   if (off.width !== ctxs.canvas.width || off.height !== ctxs.canvas.height) {
     off.width = ctxs.canvas.width;
@@ -306,7 +287,12 @@ function drawLoop(main: CanvasRenderingContext2D, body: GroupBody, paint: Paint,
   const octx = off.getContext('2d');
   if (!octx) return;
 
-  const slack = paint.borderWidth + 2;
+  /* `borderWidth` is a *model* width: its device half-extent grows with both the
+     zoom and the device ratio. A constant device slack clipped the band's border
+     off at high zoom, and clipped it twice as hard on a 2× display. */
+  const scale = Math.max(ctxs.view.sx, ctxs.view.sy);
+  const slack = Math.ceil((paint.borderWidth * ctxs.zoom * scale) / 2) + 2;
+
   const a = ctxs.toDevice(bounds.x1, bounds.y1);
   const b = ctxs.toDevice(bounds.x2, bounds.y2);
   const x = Math.max(0, Math.floor(a.x - slack));
@@ -321,6 +307,7 @@ function drawLoop(main: CanvasRenderingContext2D, body: GroupBody, paint: Paint,
     ctx.lineCap = 'butt';
     tracePath(ctx, loop.centreline);
   };
+
   const blit = (alpha: number) => {
     main.save();
     main.setTransform(1, 0, 0, 1, 0, 0);
@@ -332,7 +319,7 @@ function drawLoop(main: CanvasRenderingContext2D, body: GroupBody, paint: Paint,
   /* 1 ── the border: the outer band, with the inner band punched out of it */
   octx.setTransform(1, 0, 0, 1, 0, 0);
   octx.clearRect(x, y, w, h);
-  ctxs.view(octx);
+  ctxs.setView(octx);
   band(octx);
   octx.globalCompositeOperation = 'source-over';
   octx.strokeStyle = paint.border;
@@ -347,7 +334,7 @@ function drawLoop(main: CanvasRenderingContext2D, body: GroupBody, paint: Paint,
   /* 2 ── the body: the band itself */
   octx.setTransform(1, 0, 0, 1, 0, 0);
   octx.clearRect(x, y, w, h);
-  ctxs.view(octx);
+  ctxs.setView(octx);
   band(octx);
   octx.strokeStyle = paint.fill;
   octx.lineWidth = loop.band;

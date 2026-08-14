@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api';
+import type { CoordinateFrame } from '../graph/coordinateLayout';
 import { parsePortalId, type LabelMode } from '../graph/elements';
 import { descendantGroupIds } from '../graph/groups';
 import type { GroupLayer } from '../graph/layering';
@@ -113,6 +114,8 @@ interface Store {
   groups: Record<string, Group>;
   /** Stacking order of the groupings, recomputed after every arrangement. */
   groupLayers: Record<string, GroupLayer>;
+  /** The lattice the current arrangement was laid out on, if any. */
+  coordinateFrame: CoordinateFrame | null;
   locationLabels: Record<string, LocationLabel>;
   connectionLabels: Record<string, ConnectionLabel>;
   locations: Record<string, Location>;
@@ -165,6 +168,7 @@ interface Store {
   runLayout: () => void;
   setLabelMode: (m: LabelMode) => void;
   setGroupLayers: (layers: Record<string, GroupLayer>) => void;
+  setCoordinateFrame: (frame: CoordinateFrame | null) => void;
   setConnectionDefaults: (d: Partial<ConnectionDefaults>) => void;
   setStatus: (s: string | null) => void;
   setError: (e: string | null) => void;
@@ -348,6 +352,7 @@ export const useGraphStore = create<Store>()((set, get) => {
     mapId: null,
     groups: {},
     groupLayers: {},
+    coordinateFrame: null,
     locationLabels: {},
     connectionLabels: {},
     locations: {},
@@ -399,6 +404,7 @@ export const useGraphStore = create<Store>()((set, get) => {
           map: graph.map,
           groups: index(graph.groups),
           groupLayers: {},
+          coordinateFrame: null,
           locationLabels: index(graph.locationLabels),
           connectionLabels: index(graph.connectionLabels),
           locations: index(graph.locations),
@@ -444,6 +450,7 @@ export const useGraphStore = create<Store>()((set, get) => {
           map: null,
           groups: {},
           groupLayers: {},
+          coordinateFrame: null,
           locationLabels: {},
           connectionLabels: {},
           locations: {},
@@ -536,6 +543,13 @@ export const useGraphStore = create<Store>()((set, get) => {
         ids.length === Object.keys(prev).length &&
         ids.every((id) => prev[id]?.order === layers[id].order && prev[id]?.note === layers[id].note);
       if (!unchanged) set({ groupLayers: layers });
+    },
+    /** Ignored when nothing changed: this runs after every re-layout. */
+    setCoordinateFrame: (frame) => {
+      const cur = get().coordinateFrame;
+      if (cur === frame) return;
+      if (cur && frame && cur.plane === frame.plane && cur.unit === frame.unit) return;
+      set({ coordinateFrame: frame });
     },
     setConnectionDefaults: (d) =>
       set((s) => ({ connectionDefaults: { ...s.connectionDefaults, ...d } })),

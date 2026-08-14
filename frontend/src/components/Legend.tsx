@@ -25,6 +25,10 @@ export default function Legend() {
           ★ Default Trip Start · ↻ Restart
           <Help text="A restart is a one-way move granted by a location label: every room carrying it may jump to the label's targets. It is never drawn, but the trip planner marks every one it takes, and a trip can turn them off." />
         </li>
+        <li>
+          ⊞ Coordinate Grid
+          <Help text="Toggled in the toolbar, and only drawn behind a coordinate-grid layout. Brighter lines every five coordinates; the line through coordinate zero is brighter still." />
+        </li>
       </ul>
       <p className="muted small">
         Colors And Line Styles Are Yours To Choose — Nothing Is Overridden. "Default"

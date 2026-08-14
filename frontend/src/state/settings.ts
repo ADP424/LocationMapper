@@ -74,6 +74,11 @@ export interface Settings {
   autoCoordinateUnit: boolean;
   /** Pixels between two adjacent coordinates on a coordinate-grid layout. */
   coordinateUnit: number;
+  /**
+   * Draw the coordinate lattice behind a coordinate-grid arrangement. Off by
+   * default: it is a reading aid for one family of layouts, not a chrome.
+   */
+  showCoordinateGrid: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -94,7 +99,8 @@ export const DEFAULT_SETTINGS: Settings = {
   limitSearchTime: true,
   searchTimeLimitSeconds: 10,
   autoCoordinateUnit: true,
-  coordinateUnit: 48
+  coordinateUnit: 48,
+  showCoordinateGrid: false
 };
 
 export const SKELETON_LINE_WIDTH_RANGE = [0.75, 6] as const;
@@ -176,7 +182,8 @@ export function normaliseSettings(
       Number(s?.coordinateUnit ?? DEFAULT_SETTINGS.coordinateUnit),
       COORDINATE_UNIT_RANGE[0],
       COORDINATE_UNIT_RANGE[1]
-    )
+    ),
+    showCoordinateGrid: s?.showCoordinateGrid ?? DEFAULT_SETTINGS.showCoordinateGrid
   };
 }
 
