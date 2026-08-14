@@ -3,6 +3,7 @@ import elk from 'cytoscape-elk';
 import fcose from 'cytoscape-fcose';
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { cyHolder } from '../../graph/cyHolder';
+import { GroupBodyStore } from '../../graph/groupRegions';
 import type { LayoutName } from '../../graph/layouts';
 import { graphStyle } from '../../graph/style';
 import type { ScaleLimit } from '../../graph/viewScale';
@@ -79,6 +80,11 @@ export function useCytoscape(
       const notice = LIMIT_NOTICE[limit];
       if (notice) useGraphStore.getState().setStatus(notice);
     });
+    const groupBodies = new GroupBodyStore(
+      cy,
+      () => useGraphStore.getState().groups,
+      () => useGraphStore.getState().locations
+    );
 
     const h: CanvasHandle = {
       cy,
@@ -90,6 +96,7 @@ export function useCytoscape(
       suppressMenuRef,
       connIndexRef,
       pendingFitRef,
+      groupBodies,
       /* replaced on the next line: the scheduler has to close over the handle */
       sync: () => undefined
     };

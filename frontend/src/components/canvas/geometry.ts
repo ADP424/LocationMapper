@@ -40,6 +40,9 @@ function restack(cy: Core, layeringSource: LayoutName, rooms: boolean) {
  *
  *   1. the ViewScaler's element arrays and spatial index
  *   2. the stacking passes: `zLayer`, grouping translucency, `boxW`/`boxH`
+ *   2b. every grouping's drawn body: its geometry, its solved title anchor, and
+ *       — for a grouping that anchors no room — the leaf node's own position
+ *       and size, since nothing else in the pipeline ever sets them
  *   3. the one cached drawn-extent model every bound below solves against
  *   4. the zoom floor — a function of that extent *and* the viewport
  *   5. the viewport itself: a latched Fit, otherwise a zoom/pan clamp
@@ -68,6 +71,12 @@ function syncGeometry(handle: CanvasHandle, opts: GeometrySync) {
 
   /* 2 ── draw order, grouping translucency, and each grouping's own box */
   restack(cy, handle.layeringSourceRef.current, opts.rooms !== false);
+
+  /* 2b ── the form-fitted bodies: their geometry, their title anchors, and the
+     bleed each compound box needs to actually contain what is drawn. Runs after
+     restack (it reads zLayer, and overrides boxW/boxH for the form-fitted), and
+     before the extent dies below, so every bound solves against the right box. */
+  handle.groupBodies.sync();
 
   /* 3 ── the cached extent model dies here, and is rebuilt exactly once below */
   invalidateExtent(cy);

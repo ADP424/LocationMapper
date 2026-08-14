@@ -22,13 +22,14 @@ const nullable = <T>(v: T | null) => (v === null ? undefined : v);
 
 type Columns = Record<string, unknown>;
 
-/** What a location label stamps onto a room. */
+/** What a location label stamps onto a room. Restart targets are *structure*,
+ *  not styling, so they are deliberately absent: applying a label never copies
+ *  a restart anywhere — the label keeps granting it, to whoever carries it. */
 const labelColumns = (l: any): Columns => ({
   kind: text(l.default_kind),
   size: nullable(l.default_size),
   color: text(l.default_color),
-  text_color: text(l.default_text_color),
-  group_id: nullable(l.default_group_id)
+  text_color: text(l.default_text_color)
 });
 
 /** What a grouping stamps onto its rooms. A grouping never sets `group_id`:
@@ -56,11 +57,9 @@ const yieldTo = (cols: Columns, theirs: Iterable<string>) => {
 /**
  * Stamp a label's defaults onto a room.
  *
- * Only the room's *grouping* can hold a property back, and only while this
- * label has not been told it may override groupings. The grouping consulted is
- * the one the room is in right now — a label whose own default moves the room
- * into a different grouping does not inherit that grouping's styling, for the
- * same reason moving a room by hand does not.
+ * Every one of the room's *groupings* can hold a property back — the union of
+ * their claims — and only while this label has not been told it may override
+ * groupings.
  */
 export async function applyLocationLabel(client: PoolClient, locationId: string, labelId: string) {
   const { rows } = await client.query(`SELECT * FROM location_labels WHERE id = $1`, [labelId]);
@@ -71,10 +70,11 @@ export async function applyLocationLabel(client: PoolClient, locationId: string,
 
   if (!label.override_groupings) {
     const { rows: groups } = await client.query(
-      `SELECT g.* FROM locations l JOIN groups g ON g.id = l.group_id WHERE l.id = $1`,
+      `SELECT g.* FROM location_group_assignments a JOIN groups g ON g.id = a.group_id
+        WHERE a.location_id = $1`,
       [locationId]
     );
-    if (groups[0]) yieldTo(cols, claimed(groupColumns(groups[0])));
+    for (const group of groups) yieldTo(cols, claimed(groupColumns(group)));
   }
 
   const stmt = updateSql('locations', locationId, cols);
@@ -84,10 +84,11 @@ export async function applyLocationLabel(client: PoolClient, locationId: string,
 /**
  * Stamp a grouping's defaults onto one of its rooms.
  *
- * Called when a room is **created** inside the grouping, and on demand from
- * "Re-Apply Styling" — never when a room merely moves in, which is exactly the
- * contract labels already have. `skip` is for creation: columns the request set
- * by hand are never clobbered by a default.
+ * Called when a room is **created** inside the grouping, when it **joins** one
+ * (memberships are additive, so joining is the deliberate act — the same
+ * contract a label's assignment already has), and on demand from "Re-Apply
+ * Styling". `skip` is for creation: columns the request set by hand are never
+ * clobbered by a default.
  */
 export async function applyGroupStyling(
   client: PoolClient,

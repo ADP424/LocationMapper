@@ -3,12 +3,18 @@ import { isEffectivelyLocked } from '../graph/connectionRules';
 import { formatCoordinates } from '../graph/coordinateLayout';
 import { focusGroup, focusLocation } from '../graph/cyHolder';
 import { describeLock } from '../graph/elements';
-import { descendantGroupIds, groupPathLabel, hasGroupDefaults } from '../graph/groups';
+import { anchorGroupId, descendantGroupIds, groupPathLabel, hasGroupDefaults } from '../graph/groups';
 import {
+  DEFAULT_GROUP_PADDING,
   DIRECTION_OPTIONS,
+  GROUP_DISPLAY_HELP,
+  GROUP_DISPLAY_LABELS,
+  GROUP_DISPLAY_STYLES,
+  GROUP_PADDING_RANGE,
   LINE_STYLE_OPTIONS,
   PALETTE,
   SHAPE_OPTIONS,
+  resolveGroupPadding,
   arrowsFor,
   directionGlyph,
   directionOf,
@@ -16,9 +22,18 @@ import {
   normaliseShape
 } from '../graph/model';
 import { useGraphStore } from '../state/store';
-import type { Connection, ConnectionLabel, Group, Location, LocationLabel } from '../types';
-import { ColorField, InlineCheckField, LabelChips, OptionalColorField } from './fields';
-import GroupPicker, { KEEP } from './GroupPicker';
+import type {
+  Connection,
+  ConnectionLabel,
+  Group,
+  GroupDisplayStyle,
+  Location,
+  LocationLabel
+} from '../types';
+import { LocationPicker } from './EntityPicker';
+import { ColorField, Help, InlineCheckField, LabelChips, OptionalColorField } from './fields';
+import { restartMoveName, restartsFrom } from '../graph/restarts';
+import GroupPicker from './GroupPicker';
 import LabelPicker from './LabelPicker';
 import { inspectorCommit, useDraft } from './useDraft';
 
@@ -34,13 +49,20 @@ const CONNECTION_FIELDS = [
 /** parentId is structural, so it commits through setGroupParent, but it still
  *  lives in the draft so Apply/Revert behave like every other field. */
 const GROUP_FIELDS = [
-  'name', 'color', 'textColor', 'notes', 'parentId',
+  'name', 'color', 'textColor', 'notes', 'parentId', 'displayStyle', 'bodyPadding',
   'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor', 'overrideLabels'
 ] as const;
 
+/** Blank = "use the default" (NULL); nonsense keeps whatever was there. */
+const parsePadding = (raw: string, fallback: number | null): number | null => {
+  if (raw.trim() === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? resolveGroupPadding(n) : fallback;
+};
+
 const LOCATION_LABEL_FIELDS = [
   'name', 'color', 'notes', 'defaultKind', 'defaultSize', 'defaultColor', 'defaultTextColor',
-  'defaultGroupId', 'overrideGroupings'
+  'overrideGroupings', 'restartTargets', 'restartName', 'restartWeight'
 ] as const;
 
 const CONNECTION_LABEL_FIELDS = [
@@ -64,6 +86,12 @@ const parseSize = (raw: string, fallback: number) => {
   return Number.isFinite(n) && n > 0 ? Math.min(MAX_SIZE, n) : fallback;
 };
 
+/** A restart may be free, so 0 is legal here where a connection's weight is not. */
+const parseRestartWeight = (raw: string, fallback: number) => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.min(10_000, n) : fallback;
+};
+
 /** Whole numbers only; blank (or a lone "-") means "no coordinate". */
 const parseCoord = (s: string): number | null => {
   const t = s.trim();
@@ -85,13 +113,17 @@ function relativeGlyph(c: Connection, selfId: string): string {
   return '—';
 }
 
-/** "(Kitchen)" for a room inside a grouping, "" otherwise. */
-const groupSuffix = (loc: Location | undefined, groups: Record<string, Group>) =>
-  loc?.groupId && groups[loc.groupId] ? `(${groups[loc.groupId]!.name || 'Unnamed Grouping'})` : '';
+/** "(Kitchen)" for a room whose anchor grouping is known, "" otherwise. */
+const groupSuffix = (loc: Location | undefined, groups: Record<string, Group>) => {
+  const id = loc && anchorGroupId(loc);
+  return id && groups[id] ? `(${groups[id]!.name || 'Unnamed Grouping'})` : '';
+};
 
 /** Full path, used as the tooltip so nested groupings stay discoverable. */
-const groupTitle = (loc: Location | undefined, groups: Record<string, Group>) =>
-  loc?.groupId && groups[loc.groupId] ? groupPathLabel(groups, loc.groupId) : undefined;
+const groupTitle = (loc: Location | undefined, groups: Record<string, Group>) => {
+  const id = loc && anchorGroupId(loc);
+  return id && groups[id] ? groupPathLabel(groups, id) : undefined;
+};
 
 const byName = <T extends { name: string }>(a: T, b: T) => (a.name || '').localeCompare(b.name || '');
 
@@ -100,7 +132,8 @@ const byName = <T extends { name: string }>(a: T, b: T) => (a.name || '').locale
 function LocationInspector({ location }: { location: Location }) {
   const updateLocation = useGraphStore((s) => s.updateLocation);
   const deleteLocation = useGraphStore((s) => s.deleteLocation);
-  const setLocationGroup = useGraphStore((s) => s.setLocationGroup);
+  const addLocationGroup = useGraphStore((s) => s.addLocationGroup);
+  const removeLocationGroup = useGraphStore((s) => s.removeLocationGroup);
   const createGroupFrom = useGraphStore((s) => s.createGroupFrom);
   const connections = useGraphStore((s) => s.connections);
   const locations = useGraphStore((s) => s.locations);
@@ -108,6 +141,7 @@ function LocationInspector({ location }: { location: Location }) {
   const selectConnection = useGraphStore((s) => s.selectConnection);
   const selectLocation = useGraphStore((s) => s.selectLocation);
   const selectGroup = useGraphStore((s) => s.selectGroup);
+  const selectLocationLabel = useGraphStore((s) => s.selectLocationLabel);
   const locationLabels = useGraphStore((s) => s.locationLabels);
   const assignLocationLabel = useGraphStore((s) => s.assignLocationLabel);
   const unassignLocationLabel = useGraphStore((s) => s.unassignLocationLabel);
@@ -135,6 +169,10 @@ function LocationInspector({ location }: { location: Location }) {
     [locations]
   );
   const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
+  const restarts = useMemo(
+    () => restartsFrom(location.id, locations, locationLabels),
+    [location.id, locations, locationLabels]
+  );
 
   return (
     <>
@@ -197,36 +235,62 @@ function LocationInspector({ location }: { location: Location }) {
       </div>
 
       <div className="field">
-        <span className="field-label">Grouping</span>
+        <span className="field-label">
+          Groupings
+          <span className="muted small"> — ⚓ Marks The Layout Anchor (Oldest)</span>
+        </span>
+        {location.groupIds.length === 0 && <p className="muted small">Not In Any Grouping.</p>}
+        <ul className="chip-list">
+          {location.groupIds.map((gid, i) => {
+            const g = groups[gid];
+            if (!g) return null;
+            return (
+              <li key={gid} className="chip">
+                <span className="chip-dot" style={{ background: g.color || '#8fa7c4' }} />
+                <button className="chip-name link" title={groupPathLabel(groups, gid)} onClick={() => focusGroup(gid, selectGroup)}>
+                  {i === 0 ? '⚓ ' : ''}
+                  {g.name || 'Unnamed Grouping'}
+                </button>
+                {hasGroupDefaults(g) && (
+                  <button
+                    className="chip-btn"
+                    title="Stamp this grouping's default styling onto this room"
+                    onClick={() => void applyGroupStyling(location.id, gid)}
+                  >
+                    Apply
+                  </button>
+                )}
+                <button className="chip-btn danger" title="Remove From Grouping" onClick={() => void removeLocationGroup(location.id, gid)}>
+                  ✕
+                </button>
+              </li>
+            );
+          })}
+        </ul>
         <GroupPicker
           groups={groupList}
-          value={location.groupId}
-          onPick={(gid) => void setLocationGroup(location.id, gid)}
+          value={null}
+          excludeIds={new Set(location.groupIds)}
+          allowNone={false}
+          noneLabel="+ Add Grouping"
+          pickPrompt="Click A Grouping To Add This Room To It"
+          onPick={(gid) => gid && void addLocationGroup(location.id, gid)}
           newLabel="+ New Grouping With This Room"
           onCreateNew={() => void createGroupFrom([location.id])}
         />
       </div>
 
-      {location.groupId && groups[location.groupId] && (
-        <div className="row actions">
-          <button className="link subtle" onClick={() => focusGroup(location.groupId!, selectGroup)}>
-            Inspect "{groupPathLabel(groups, location.groupId)}"
-          </button>
-          {hasGroupDefaults(groups[location.groupId]!) && (
-            <button
-              className="chip-btn"
-              title="Stamp this grouping's default styling onto this room"
-              onClick={() => void applyGroupStyling(location.id)}
-            >
-              Apply Styling
-            </button>
-          )}
-        </div>
-      )}
-
       <h3>Labels</h3>
       <LabelChips
         labels={location.labelIds.map((id) => locationLabels[id]).filter(Boolean) as LocationLabel[]}
+        note={(id) => {
+          const l = locationLabels[id];
+          if (!l?.restartTargets.length) return undefined;
+          const names = l.restartTargets
+            .map((t) => locations[t]?.name || 'Unnamed Location')
+            .join(', ');
+          return `Grants a restart: ${restartMoveName(l)} → ${names}`;
+        }}
         onApply={(labelId) => void applyLocationLabelStyling(location.id, labelId)}
         onRemove={(labelId) => void unassignLocationLabel(location.id, labelId)}
       />
@@ -273,6 +337,39 @@ function LocationInspector({ location }: { location: Location }) {
         checked={location.visited}
         onChange={(v) => void updateLocation(location.id, { visited: v })}
       />
+
+      {restarts.length > 0 && (
+        <>
+          <h3>
+            Restarts ({restarts.length})
+            <Help text="One-way moves granted by a label. Never drawn on the map, and only ever used by a trip that allows restarts." />
+          </h3>
+          <ul className="hit-list dense">
+            {restarts.map((r) => {
+              const label = locationLabels[r.labelId];
+              return (
+                <li key={r.id} className="restart-row">
+                  <button className="link" onClick={() => focusLocation(r.toId, selectLocation)}>
+                    <span className="hit-title">
+                      ↻ {restartMoveName(label)} → {locations[r.toId]?.name || 'Unnamed Location'}
+                    </span>
+                    <span className="muted small">
+                      Via "{label?.name || 'Unnamed Label'}" · Weight {r.weight}
+                    </span>
+                  </button>
+                  <button
+                    className="icon"
+                    title="Inspect The Label That Grants This"
+                    onClick={() => selectLocationLabel(r.labelId)}
+                  >
+                    🏷
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
 
       <h3>Connections ({related.length})</h3>
       <ul className="hit-list dense">
@@ -331,13 +428,10 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
     normaliseConnection
   );
 
-  const [reqToAdd, setReqToAdd] = useState('');
-
   const visitedSet = useMemo(
     () => new Set(Object.values(locations).filter((l) => l.visited).map((l) => l.id)),
     [locations]
   );
-  const sortedLocations = useMemo(() => Object.values(locations).sort(byName), [locations]);
 
   const source = locations[connection.sourceId];
   const target = locations[connection.targetId];
@@ -473,27 +567,17 @@ function ConnectionInspector({ connection }: { connection: Connection }) {
             ))}
             {draft.requires.length === 0 && <li className="muted">None.</li>}
           </ul>
-          <div className="row">
-            <select value={reqToAdd} onChange={(e) => setReqToAdd(e.target.value)}>
-              <option value="">Add Required Location…</option>
-              {sortedLocations
-                .filter((l) => !draft.requires.includes(l.id))
-                .map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name || 'Unnamed Location'}
-                  </option>
-                ))}
-            </select>
-            <button
-              disabled={!reqToAdd}
-              onClick={() => {
-                setDraft({ ...draft, requires: [...draft.requires, reqToAdd] });
-                setReqToAdd('');
-              }}
-            >
-              Add
-            </button>
-          </div>
+          {/* search it, or click it on the map — the inspector stays open either way */}
+          <LocationPicker
+            buttonLabel="+ Add Required Location"
+            prompt="Click A Location To Require It Before This Connection Opens"
+            excludeIds={new Set(draft.requires)}
+            multi
+            emptyLabel="No Locations On This Map Yet."
+            onPick={(id) =>
+              setDraft((d) => (d.requires.includes(id) ? d : { ...d, requires: [...d.requires, id] }))
+            }
+          />
           <label>
             Lock Note
             <input
@@ -541,7 +625,8 @@ function GroupInspector({ group }: { group: Group }) {
   const updateGroup = useGraphStore((s) => s.updateGroup);
   const deleteGroup = useGraphStore((s) => s.deleteGroup);
   const ungroupAll = useGraphStore((s) => s.ungroupAll);
-  const setLocationGroup = useGraphStore((s) => s.setLocationGroup);
+  const addLocationGroup = useGraphStore((s) => s.addLocationGroup);
+  const removeLocationGroup = useGraphStore((s) => s.removeLocationGroup);
   const setGroupParent = useGraphStore((s) => s.setGroupParent);
   const selectLocation = useGraphStore((s) => s.selectLocation);
   const selectGroup = useGraphStore((s) => s.selectGroup);
@@ -561,14 +646,8 @@ function GroupInspector({ group }: { group: Group }) {
   );
   const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(group, GROUP_FIELDS, save);
 
-  const [toAdd, setToAdd] = useState('');
-
   const members = useMemo(
-    () => Object.values(locations).filter((l) => l.groupId === group.id).sort(byName),
-    [locations, group.id]
-  );
-  const outsiders = useMemo(
-    () => Object.values(locations).filter((l) => l.groupId !== group.id).sort(byName),
+    () => Object.values(locations).filter((l) => l.groupIds.includes(group.id)).sort(byName),
     [locations, group.id]
   );
   const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
@@ -610,6 +689,39 @@ function GroupInspector({ group }: { group: Group }) {
           onPick={(parentId) => setDraft((d) => ({ ...d, parentId }))}
         />
       </div>
+      <label>
+        Display As
+        <select
+          value={draft.displayStyle}
+          onChange={(e) =>
+            setDraft((d) => ({ ...d, displayStyle: e.target.value as GroupDisplayStyle }))
+          }
+        >
+          {GROUP_DISPLAY_STYLES.map((s) => (
+            <option key={s} value={s}>{GROUP_DISPLAY_LABELS[s]}</option>
+          ))}
+        </select>
+      </label>
+      <p className="muted small">{GROUP_DISPLAY_HELP[draft.displayStyle]}</p>
+      <label>
+        Padding — How Far The Body Reaches Past Its Rooms
+        <input
+          type="number"
+          min={GROUP_PADDING_RANGE[0]}
+          max={GROUP_PADDING_RANGE[1]}
+          step={2}
+          value={draft.bodyPadding ?? ''}
+          placeholder={`Default (${DEFAULT_GROUP_PADDING})`}
+          onChange={(e) => setDraft((d) => ({ ...d, bodyPadding: parsePadding(e.target.value, d.bodyPadding) }))}
+        />
+      </label>
+      <p className="muted small">
+        {draft.displayStyle === 'loop'
+          ? 'Also The Thickness Of The Band. Re-Layout To Give It Room.'
+          : draft.displayStyle === 'outline'
+            ? 'Also The Thickness Of The Corridors Between Rooms. Re-Layout To Give It Room.'
+            : 'Re-Layout To Respace The Rooms Around It.'}
+      </p>
 
       <div className="row">
         <ColorField
@@ -715,15 +827,21 @@ function GroupInspector({ group }: { group: Group }) {
         Re-Apply Styling To All {members.length} Rooms
       </button>
 
-      <h3>Rooms In This Grouping ({members.length})</h3>
+      <h3>
+        Rooms In This Grouping ({members.length})
+        <span className="muted small"> — ⚓ Marks The Layout Anchor</span>
+      </h3>
       <ul className="hit-list dense">
         {members.map((l) => (
           <li key={l.id}>
             <button className="link" onClick={() => focusLocation(l.id, selectLocation)}>
-              <span className="hit-title">{l.name || 'Unnamed Location'}</span>
+              <span className="hit-title">
+                {anchorGroupId(l) === group.id ? '⚓ ' : ''}
+                {l.name || 'Unnamed Location'}
+              </span>
               <span className="muted small">{formatCoordinates(l) || '—'}</span>
             </button>
-            <button className="icon danger" title="Remove From Grouping" onClick={() => void setLocationGroup(l.id, null)}>
+            <button className="icon danger" title="Remove From Grouping" onClick={() => void removeLocationGroup(l.id, group.id)}>
               ✕
             </button>
           </li>
@@ -746,22 +864,16 @@ function GroupInspector({ group }: { group: Group }) {
         {subGroups.length === 0 && <li className="muted small">None.</li>}
       </ul>
 
-      <div className="row">
-        <select value={toAdd} onChange={(e) => setToAdd(e.target.value)}>
-          <option value="">Add A Room…</option>
-          {outsiders.map((l) => (
-            <option key={l.id} value={l.id}>{l.name || 'Unnamed Location'}</option>
-          ))}
-        </select>
-        <button
-          disabled={!toAdd}
-          onClick={() => {
-            void setLocationGroup(toAdd, group.id);
-            setToAdd('');
-          }}
-        >
-          Add
-        </button>
+      <div className="field">
+        <span className="field-label">Add A Room</span>
+        <LocationPicker
+          buttonLabel="+ Add A Room"
+          prompt={`Click A Room To Add It To "${group.name || 'Unnamed Grouping'}"`}
+          excludeIds={new Set(members.map((l) => l.id))}
+          multi
+          emptyLabel="No Rooms Left To Add."
+          onPick={(id) => void addLocationGroup(id, group.id)}
+        />
       </div>
 
       <button disabled={members.length === 0} onClick={() => void ungroupAll(group.id)}>
@@ -776,7 +888,6 @@ function GroupInspector({ group }: { group: Group }) {
 /* ------------------------------------------------- Location label form */
 
 function LocationLabelInspector({ label }: { label: LocationLabel }) {
-  const groups = useGraphStore((s) => s.groups);
   const locations = useGraphStore((s) => s.locations);
   const updateLocationLabel = useGraphStore((s) => s.updateLocationLabel);
   const deleteLocationLabel = useGraphStore((s) => s.deleteLocationLabel);
@@ -789,7 +900,6 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
   );
   const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(label, LOCATION_LABEL_FIELDS, save);
 
-  const groupList = useMemo(() => Object.values(groups), [groups]);
   const members = useMemo(
     () => Object.values(locations).filter((l) => l.labelIds.includes(label.id)),
     [locations, label.id]
@@ -867,16 +977,6 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
         />
       </div>
 
-      <div className="field">
-        <span className="field-label">Default Grouping</span>
-        <GroupPicker
-          groups={groupList}
-          value={draft.defaultGroupId}
-          noneLabel="No Override"
-          onPick={(defaultGroupId) => setDraft((d) => ({ ...d, defaultGroupId }))}
-        />
-      </div>
-
       <InlineCheckField
         label="Override Grouping Styling"
         title="Off, any property the room's grouping sets is left alone"
@@ -887,6 +987,78 @@ function LocationLabelInspector({ label }: { label: LocationLabel }) {
         Off, A Property The Room's Grouping Already Sets Is Left Alone. Other Labels Are Never Held
         Back: The Last Label Applied Always Wins.
       </p>
+
+      <h3>
+        Restarts
+        <Help text="Every room with this label gains a one-way move to each target below. It is never drawn on the map, and the trip planner only walks it when the trip allows restarts. A room never restarts to itself, and deleting a target removes it from this list everywhere." />
+      </h3>
+      <fieldset className="lock-box">
+        <legend>Targets ({draft.restartTargets.length})</legend>
+        <div className="row">
+          <label>
+            Move Name
+            <Help text='What a plan calls this move. Blank reads as "Restart".' />
+            <input
+              value={draft.restartName}
+              placeholder="Restart"
+              onChange={(e) => setDraft({ ...draft, restartName: e.target.value })}
+            />
+          </label>
+          <label>
+            Weight
+            <Help text="Cost of one restart, in the same units as a connection's weight. 0 makes it free." />
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={draft.restartWeight}
+              onChange={(e) =>
+                setDraft((d) => ({ ...d, restartWeight: parseRestartWeight(e.target.value, d.restartWeight) }))
+              }
+            />
+          </label>
+        </div>
+        <ul className="req-list restart-list">
+          {[...draft.restartTargets]
+            .sort((a, b) =>
+              (locations[a]?.name || '').localeCompare(locations[b]?.name || '')
+            )
+            .map((id) => (
+              <li key={id}>
+                <span className="restart-glyph">↻</span>
+                <button className="link" onClick={() => focusLocation(id, selectLocation)}>
+                  {locations[id]?.name || 'Unnamed Location'}
+                </button>
+                {locations[id]?.labelIds.includes(label.id) && (
+                  <span className="muted small" title="A room never restarts to itself">
+                    (Carries This Label)
+                  </span>
+                )}
+                <button
+                  className="icon danger"
+                  onClick={() =>
+                    setDraft({ ...draft, restartTargets: draft.restartTargets.filter((r) => r !== id) })
+                  }
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          {!draft.restartTargets.length && <li className="muted">None — This Label Grants No Restarts.</li>}
+        </ul>
+        <LocationPicker
+          buttonLabel="+ Add Restart Target"
+          prompt="Click A Location Every Room With This Label May Restart To"
+          excludeIds={new Set(draft.restartTargets)}
+          multi
+          emptyLabel="No Locations On This Map Yet."
+          onPick={(id) =>
+            setDraft((d) =>
+              d.restartTargets.includes(id) ? d : { ...d, restartTargets: [...d.restartTargets, id] }
+            )
+          }
+        />
+      </fieldset>
 
       <label>
         Notes
@@ -945,13 +1117,10 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
   );
   const { draft, setDraft, dirty, commit, revert, cancelCommit } = useDraft(label, CONNECTION_LABEL_FIELDS, save);
 
-  const [reqToAdd, setReqToAdd] = useState('');
-
   const members = useMemo(
     () => Object.values(connections).filter((c) => c.labelIds.includes(label.id)),
     [connections, label.id]
   );
-  const sortedLocations = useMemo(() => Object.values(locations).sort(byName), [locations]);
 
   return (
     <>
@@ -1069,25 +1238,18 @@ function ConnectionLabelInspector({ label }: { label: ConnectionLabel }) {
             ))}
             {!draft.defaultRequires.length && <li className="muted">None.</li>}
           </ul>
-          <div className="row">
-            <select value={reqToAdd} onChange={(e) => setReqToAdd(e.target.value)}>
-              <option value="">Add Required Location…</option>
-              {sortedLocations
-                .filter((l) => !draft.defaultRequires.includes(l.id))
-                .map((l) => (
-                  <option key={l.id} value={l.id}>{l.name || 'Unnamed Location'}</option>
-                ))}
-            </select>
-            <button
-              disabled={!reqToAdd}
-              onClick={() => {
-                setDraft({ ...draft, defaultRequires: [...draft.defaultRequires, reqToAdd] });
-                setReqToAdd('');
-              }}
-            >
-              Add
-            </button>
-          </div>
+          <LocationPicker
+            buttonLabel="+ Add Required Location"
+            prompt="Click A Location To Add It To This Label's Default Unlock Conditions"
+            excludeIds={new Set(draft.defaultRequires)}
+            multi
+            emptyLabel="No Locations On This Map Yet."
+            onPick={(id) =>
+              setDraft((d) =>
+                d.defaultRequires.includes(id) ? d : { ...d, defaultRequires: [...d.defaultRequires, id] }
+              )
+            }
+          />
           <label>
             Default Lock Note
             <input
@@ -1149,13 +1311,13 @@ function MultiInspector({ ids }: { ids: string[] }) {
   const bulkUpdateLocations = useGraphStore((s) => s.bulkUpdateLocations);
   const bulkAssignLocationLabel = useGraphStore((s) => s.bulkAssignLocationLabel);
   const createGroupFrom = useGraphStore((s) => s.createGroupFrom);
+  const removeLocationGroup = useGraphStore((s) => s.removeLocationGroup);
   const deleteLocations = useGraphStore((s) => s.deleteLocations);
   const selectLocation = useGraphStore((s) => s.selectLocation);
 
   const members = useMemo(() => ids.map((id) => locations[id]).filter(Boolean) as Location[], [ids, locations]);
 
   const [shape, setShape] = useState('__keep__');
-  const [groupId, setGroupId] = useState('__keep__');
   const [visited, setVisited] = useState<'__keep__' | 'yes' | 'no'>('__keep__');
   const [changeFill, setChangeFill] = useState(false);
   const [fill, setFill] = useState('#ffffff');
@@ -1164,13 +1326,11 @@ function MultiInspector({ ids }: { ids: string[] }) {
   const [changeSize, setChangeSize] = useState(false);
   const [size, setSize] = useState(1);
 
+  const bulkAssignLocationGroup = useGraphStore((s) => s.bulkAssignLocationGroup);
+
   /* mirror the form so the commit closure always sees the latest values */
-  const formRef = useRef({
-    shape, groupId, visited, changeFill, fill, changeText, textColor, changeSize, size
-  });
-  formRef.current = {
-    shape, groupId, visited, changeFill, fill, changeText, textColor, changeSize, size
-  };
+  const formRef = useRef({ shape, visited, changeFill, fill, changeText, textColor, changeSize, size });
+  formRef.current = { shape, visited, changeFill, fill, changeText, textColor, changeSize, size };
   const idsRef = useRef(ids);
   idsRef.current = ids;
   const skipRef = useRef(false);
@@ -1182,15 +1342,11 @@ function MultiInspector({ ids }: { ids: string[] }) {
     if (f.changeFill) patch.color = f.fill;
     if (f.changeText) patch.textColor = f.textColor;
     if (f.changeSize) patch.size = f.size;
-    if (f.groupId !== '__keep__' && f.groupId !== '__new__') {
-      patch.groupId = f.groupId === '' ? null : f.groupId;
-    }
     return patch;
   };
 
   const reset = () => {
     setShape('__keep__');
-    setGroupId('__keep__');
     setVisited('__keep__');
     setChangeFill(false);
     setChangeText(false);
@@ -1202,24 +1358,14 @@ function MultiInspector({ ids }: { ids: string[] }) {
     if (skipRef.current) return;
     const f = formRef.current;
     const patch = patchFrom(f);
-    const makeGroup = f.groupId === '__new__';
-    if (!makeGroup && Object.keys(patch).length === 0) return;
+    if (Object.keys(patch).length === 0) return;
 
     /* clear first so a second outside-click cannot re-apply the same edit */
-    formRef.current = {
-      ...f,
-      shape: '__keep__',
-      groupId: '__keep__',
-      visited: '__keep__',
-      changeFill: false,
-      changeText: false,
-      changeSize: false
-    };
+    formRef.current = { ...f, shape: '__keep__', visited: '__keep__', changeFill: false, changeText: false, changeSize: false };
     reset();
 
-    if (makeGroup) void createGroupFrom(idsRef.current);
-    if (Object.keys(patch).length) void bulkUpdateLocations(idsRef.current, patch);
-  }, [bulkUpdateLocations, createGroupFrom]);
+    void bulkUpdateLocations(idsRef.current, patch);
+  }, [bulkUpdateLocations]);
 
   /* same contract as the single-element inspectors: click-out / unmount applies */
   useEffect(() => {
@@ -1231,7 +1377,13 @@ function MultiInspector({ ids }: { ids: string[] }) {
   }, [commit]);
 
   const groupList = useMemo(() => Object.values(groups).sort(byName), [groups]);
-  const hasChanges = Object.keys(patchFrom(formRef.current)).length > 0 || groupId === '__new__';
+  /** Groupings every selected room already shares — the only ones "remove
+   *  from all" can act on without silently no-op-ing for part of the batch. */
+  const commonGroupIds = useMemo(() => {
+    if (!members.length) return [];
+    return members[0].groupIds.filter((gid) => members.every((l) => l.groupIds.includes(gid)));
+  }, [members]);
+  const hasChanges = Object.keys(patchFrom(formRef.current)).length > 0;
 
   return (
     <>
@@ -1293,17 +1445,35 @@ function MultiInspector({ ids }: { ids: string[] }) {
       )}
 
       <div className="field">
-        <span className="field-label">Grouping</span>
+        <span className="field-label">Add Grouping To All</span>
         <GroupPicker
           groups={groupList}
-          value={groupId === '__keep__' ? KEEP : groupId === '' ? null : groupId}
-          keepLabel="Keep Current"
-          onKeep={() => setGroupId('__keep__')}
-          onPick={(gid) => setGroupId(gid ?? '')}
+          value={null}
+          allowNone={false}
+          noneLabel="+ Add Grouping To All"
+          pickPrompt={`Click A Grouping To Add ${ids.length} Rooms To It`}
+          onPick={(gid) => gid && void bulkAssignLocationGroup(idsRef.current, gid)}
           newLabel="+ New Grouping From These Rooms"
-          onCreateNew={() => setGroupId('__new__')}
+          onCreateNew={() => void createGroupFrom(idsRef.current)}
         />
       </div>
+
+      {commonGroupIds.length > 0 && (
+        <div className="field">
+          <span className="field-label">Remove Grouping From All</span>
+          <GroupPicker
+            groups={groupList.filter((g) => commonGroupIds.includes(g.id))}
+            value={null}
+            allowNone={false}
+            noneLabel="Remove Grouping From All…"
+            pickPrompt={`Click A Grouping To Remove ${ids.length} Rooms From It`}
+            onPick={(gid) => {
+              if (!gid) return;
+              for (const id of idsRef.current) void removeLocationGroup(id, gid);
+            }}
+          />
+        </div>
+      )}
 
       <div className="field">
         <span className="field-label">Add Label To All</span>
@@ -1370,7 +1540,7 @@ function MultiInspector({ ids }: { ids: string[] }) {
             <button className="link" onClick={() => selectLocation(l.id)}>
               <span className="hit-title">{l.name || 'Unnamed Location'}</span>
               <span className="muted small">
-                {[formatCoordinates(l), l.groupId ? groups[l.groupId]?.name : null].filter(Boolean).join(' · ') || '—'}
+                {[formatCoordinates(l), groups[anchorGroupId(l) ?? '']?.name].filter(Boolean).join(' · ') || '—'}
               </span>
             </button>
           </li>
@@ -1397,6 +1567,9 @@ export default function DetailsPanel() {
     const onDown = (e: MouseEvent) => {
       if (!asideRef.current || asideRef.current.contains(e.target as Node)) return;
       if ((e.target as HTMLElement).closest('.menu-panel')) return; // don't commit while using a picker
+      /* an armed picker is *part of* this form: the canvas click is an edit,
+         not a click-away, and committing mid-pick would split it in two */
+      if (useGraphStore.getState().pick) return;
       inspectorCommit.current?.();
     };
     document.addEventListener('mousedown', onDown, true);

@@ -23,6 +23,13 @@ const tv = (ele: Ele) => (ele.data('tView') as number) || 1;
 const lv = (ele: Ele) => (ele.data('lineView') as number) || 1;
 const lineW = (e: EdgeSingular) => ((e.data('lineWidth') as number) || 2) * lv(e);
 
+/** Matches `TITLE_GAP` in graph/groupRegions — the title's clearance above its edge. */
+const TITLE_GAP = 8;
+
+/** The title, lifted clear of the edge it is anchored to. Scales with the text. */
+const titleMarginY = (e: NodeSingular) =>
+  ((e.data('titleDy') as number) || 0) - (TITLE_GAP + ((e.data('titleH') as number) || 0) / 2) * tv(e);
+
 /** Ordering matters: Cytoscape resolves conflicts by *last matching rule*. */
 export const graphStyle: any[] = [
   /* -------------------------------------------------------- groupings */
@@ -30,25 +37,40 @@ export const graphStyle: any[] = [
     selector: 'node.group',
     style: {
       shape: 'round-rectangle',
-      'background-color': 'data(fill)',
-      'background-opacity': 'data(groupFillOpacity)',
-      'border-color': 'data(border)',
-      'border-width': 2,
-      'border-opacity': 'data(groupBorderOpacity)',
+      /* a childless (anchorless) grouping has no compound geometry of its own;
+         GroupBodyStore.apply() sizes it to its drawn region every sync. A
+         compound parent ignores width/height entirely, so this is a safe
+         default for both kinds. */
+      width: 'data(leafW)',
+      height: 'data(leafH)',
+      /* the overlay paints every body now, rectangles included — the actual
+         zeroing lives in a rule placed after every selection/highlight rule
+         below, so no interaction state can put a box back */
       /* stacking order among groupings; `z-compound-depth: bottom` keeps the
          whole band under every room, so this only orders the boxes */
       'z-index': 'data(zLayer)',
-      padding: 30,
+      /* an anchored grouping's compound padding — the room the layout reserves
+         for its own body around its anchored members */
+      padding: (e: NodeSingular) => (e.data('bodyPadding') as number) || 0,
       label: 'data(label)',
       color: 'data(textColor)',
       /* the same family `measure.ts` measures `titleW` with, so the skeleton's
          fitted title really is the width the fit solved for */
       'font-family': 'Inter, system-ui, -apple-system, sans-serif',
-      'font-size': (e: NodeSingular) => 15 * tv(e),
+      /* 15 px × the grouping's own area-derived scale × the view scale. The
+         skeleton's fitted `tView` divides the scale straight back out, so the
+         zoomed-out title is sized by the grouping's bounds alone. */
+      'font-size': (e: NodeSingular) => 15 * ((e.data('titleScale') as number) || 1) * tv(e),
       'font-weight': 'bold',
-      'text-valign': 'top',
+      'text-valign': 'center',
       'text-halign': 'center',
-      'text-margin-y': (e: NodeSingular) => -8 * tv(e),
+      'text-margin-x': 'data(titleDx)',
+      /* every grouping's title is anchored to its drawn body's top-most edge —
+         `titleDx/titleDy` point from the node's centre to that edge's centre,
+         and the margin below lifts the title clear of it. A rectangle's
+         top-most edge is simply its own top, so this reduces to the plain
+         rectangle placement it has always had. */
+      'text-margin-y': titleMarginY,
       /* A grouping's title takes **no** plate. Its colour falls back to the
          body colour, so a plate in that same colour rendered it invisible —
          and, scaled by the skeleton's fit factor, the plate and its border
@@ -70,17 +92,18 @@ export const graphStyle: any[] = [
      writes `tView` sized for that fit). Placed after the base rule above so
      it wins every property it sets; placed before the selection/highlight
      rules further down so a selected grouping still gets its amber border. */
+  /* The skeleton title keeps its size — the ViewScaler still fits it to the
+     grouping's total bounds, not to its filled area — and keeps its anchor. It
+     simply grows in place, so nothing jumps as you cross the threshold, and it
+     can never land in the hole of a loop or off the edge of a rectangle. */
   {
     selector: 'node.group.skel',
     style: {
-      'text-valign': 'center',
-      'text-halign': 'center',
-      'text-margin-y': 0,
       'border-width': 3,
       /* the only readable thing left, so it's boosted against the canvas */
       'background-opacity': (e: NodeSingular) =>
         Math.min(0.55, ((e.data('groupFillOpacity') as number) || 0.2) * 1.6),
-      'transition-property': 'background-opacity, border-width, text-valign, text-margin-y',
+      'transition-property': 'background-opacity, border-width',
       'transition-duration': '140ms'
     }
   },
@@ -324,6 +347,34 @@ export const graphStyle: any[] = [
      legible: a soft dim, not the old opaque fade that hid names entirely. */
   { selector: '.route-dim', style: { opacity: 0.45, 'text-opacity': 0.4, 'text-background-opacity': 0.35 } },
   { selector: 'node.group.route-dim', style: { opacity: 0.5 } },
+
+  /* ── every grouping's body is painted by the overlay ────────────────────
+     Cytoscape compound parents can only be simple shapes, and with any two
+     groupings now free to overlap, a Cytoscape-painted rectangle would always
+     win the stack regardless of `zLayer`. So the GroupShapeLayer overlay draws
+     every body — rectangles included — on a canvas beneath this one. The node
+     keeps everything else it is for — containment (for an anchored room), its
+     title, its place in the layout — but none of its body is painted here: not
+     the fill, not the border, not the grab overlay.
+
+     Placed after every selection, highlight and route rule above, so that no
+     interaction state can put a box back. The overlay draws those states
+     itself, in the right shape. */
+  {
+    selector: 'node.group',
+    style: {
+      'background-opacity': 0,
+      'border-width': 0,
+      'border-opacity': 0,
+      'overlay-opacity': 0
+    }
+  },
+  /* …and a body that is not drawn must not be hit either. `bodyHit` is written
+     by GroupShapeLayer from a real point-in-region test, in a capture-phase
+     listener that lands before Cytoscape's hit test reads this rule. Everything
+     downstream — selection, drag, drop targets, the context menu, the marquee —
+     inherits the correct hit area without knowing any of this happened. */
+  { selector: 'node.group[bodyHit = 0]', style: { events: 'no' } },
 
   /* "arrows into space" mode: the anchor is an invisible, still-draggable grab
      point — the arrowhead (inherited from the connection's own direction) or,

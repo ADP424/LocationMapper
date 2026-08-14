@@ -19,7 +19,7 @@ export default function GroupPanel() {
   const rows = useMemo(() => {
     const counts = new Map<string, number>();
     for (const l of Object.values(locations)) {
-      if (l.groupId) counts.set(l.groupId, (counts.get(l.groupId) ?? 0) + 1);
+      for (const gid of l.groupIds) counts.set(gid, (counts.get(gid) ?? 0) + 1);
     }
     return flattenGroupTree(buildGroupTree(Object.values(groups))).map((node) => ({
       ...node,

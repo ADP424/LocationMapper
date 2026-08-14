@@ -19,7 +19,6 @@ const columns = (b: ReturnType<typeof locationCreate.parse>) => ({
   visited: b.visited,
   x: b.x,
   y: b.y,
-  group_id: b.groupId,
   coord_x: b.coordX,
   coord_y: b.coordY,
   coord_z: b.coordZ
@@ -41,32 +40,28 @@ locationsRouter.post(
     const mapId = uuid.parse(req.params.mapId);
     const b = locationCreate.parse(req.body);
     await assertMapExists(mapId);
-    if (b.groupId) await assertGroupOnMap(b.groupId, mapId);
+    const groupIds = [...new Set(b.groupIds ?? [])];
+    if (groupIds.length) await Promise.all(groupIds.map((gid) => assertGroupOnMap(gid, mapId)));
 
     const id = await withTransaction(async (client) => {
       const stmt = insertSql('locations', { map_id: mapId, ...columns(b) }, 'id');
       const { rows } = await client.query(stmt.text, stmt.values);
       const id = rows[0].id as string;
-      /* a room *created* inside a grouping takes its styling immediately; one
-         that is merely moved in does not, exactly as with labels */
-      if (b.groupId) await applyGroupStyling(client, id, b.groupId, explicitStyling(b));
+      /* a room *created* inside a grouping takes its styling immediately, in
+         membership order — the first is the anchor, and every grouping's
+         defaults apply, exactly as if each had been joined right after create */
+      const skip = explicitStyling(b);
+      for (const gid of groupIds) {
+        await client.query(
+          `INSERT INTO location_group_assignments (location_id, group_id) VALUES ($1, $2)`,
+          [id, gid]
+        );
+        await applyGroupStyling(client, id, gid, skip);
+      }
       return id;
     });
 
     res.status(201).json(await fetchLocation(id));
-  })
-);
-
-/** Stamp this room's own grouping's defaults onto it, on demand. */
-locationsRouter.post(
-  '/locations/:id/group/apply',
-  ah(async (req, res) => {
-    const id = uuid.parse(req.params.id);
-    const location = await fetchLocation(id); // 404s if it is gone
-    if (location.groupId) {
-      await withTransaction((client) => applyGroupStyling(client, id, location.groupId!));
-    }
-    res.json(await fetchLocation(id));
   })
 );
 
@@ -77,13 +72,15 @@ locationsRouter.get(
   })
 );
 
+/** Grouping membership goes through the dedicated endpoints, not this one —
+ *  `columns()` never reads `groupIds`, so a request that sends it is a no-op
+ *  on that field rather than an error. */
 locationsRouter.patch(
   '/locations/:id',
   ah(async (req, res) => {
     const id = uuid.parse(req.params.id);
     const b = locationUpdate.parse(req.body);
-    const mapId = await mapIdOf('locations', id);
-    if (b.groupId) await assertGroupOnMap(b.groupId, mapId);
+    await mapIdOf('locations', id); // 404s for an unknown location
 
     const stmt = updateSql('locations', id, columns(b));
     if (stmt) await query(stmt.text, stmt.values);

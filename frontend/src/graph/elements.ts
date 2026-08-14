@@ -21,6 +21,8 @@ import {
   PLATE_PAD,
   effectiveLineStyle,
   normaliseShape,
+  normaliseGroupDisplay,
+  resolveGroupPadding,
   shapeMetrics,
   weightToWidth
 } from './model';
@@ -159,15 +161,21 @@ export function buildElements(
 
   const memberCount = new Map<string, number>();
   for (const l of locations) {
-    if (l.groupId) memberCount.set(l.groupId, (memberCount.get(l.groupId) ?? 0) + 1);
+    for (const gid of l.groupIds) memberCount.set(gid, (memberCount.get(gid) ?? 0) + 1);
   }
 
   /* a grouping is drawn when it — or anything nested in it — holds a room */
   const visible = renderableGroupIds(groups, memberCount);
   const liveGroups = new Map(groups.filter((g) => visible.has(g.id)).map((g) => [g.id, g]));
 
-  const parentOf = (l: Location | undefined) =>
-    l?.groupId && liveGroups.has(l.groupId) ? groupNodeId(l.groupId) : undefined;
+  /* the anchor (oldest membership) is the compound parent; if its grouping is
+     not drawn, the next-oldest drawn membership quietly takes over containment */
+  const parentOf = (l: Location | undefined) => {
+    for (const gid of l?.groupIds ?? []) {
+      if (liveGroups.has(gid)) return groupNodeId(gid);
+    }
+    return undefined;
+  };
 
   /* parents must be added before their children (compound nesting on add) */
   const orderedGroups = flattenGroupTree(buildGroupTree([...liveGroups.values()])).map((n) => n.group);
@@ -191,49 +199,82 @@ export function buildElements(
     const parent = g.parentId && liveGroups.has(g.parentId) ? groupNodeId(g.parentId) : undefined;
     const count = memberCount.get(g.id) ?? 0;
     const rawGroupW = showLabels ? measureTextWidth(g.name || 'Unnamed Grouping', GROUP_LABEL_FONT) : 0;
-    const els = memo(groupMemo, g, `${common}|${parent ?? ''}|${count}`, () => [
-      {
-        data: {
-          id: groupNodeId(g.id),
-          groupId: g.id,
-          kind: 'group',
-          label: showLabels ? g.name || 'Unnamed Grouping' : '',
-          fill: g.color || PALETTE.groupFill,
-          border: g.color || PALETTE.groupBorder,
-          /* the title falls back to the body colour until it is given its own */
-          textColor: g.textColor || g.color || PALETTE.groupBorder,
-          memberCount: count,
-          /* un-wrapped, so it feeds the label ceiling (see viewScale) */
-          labelWidth: rawGroupW * scale,
-          lw: rawGroupW * scale,
-          lh: rawGroupW ? GROUP_LINE_HEIGHT * scale : 0,
-          /* …and these are the *raw* metrics at the base font, with no Base
-             Size folded in: in the skeleton `tView` replaces Base Size rather
-             than multiplying it, so the drawn title is exactly
-             `titleW × tView` wide and `titleH × tView` tall. That identity is
-             what lets the fit below hand the title exactly the space it needs. */
-          titleW: rawGroupW,
-          titleH: rawGroupW ? GROUP_LINE_HEIGHT : 0,
-          /* neutral defaults; the layering pass refines them after every
-             arrangement (see graph/layering) */
-          zLayer: 1,
-          groupFillOpacity: GROUP_OPACITY.fill,
-          groupBorderOpacity: GROUP_OPACITY.border,
-          /* sub-groupings are simply compound children of their parent */
-          parent,
-          tView: scale,
-          minFontView: 0,
-          skel: 0,
-          boxW: 0,
-          boxH: 0
-        },
-        classes: 'group',
-        /* grouping selection lives in the store and is drawn with `hl-primary`;
-           Cytoscape's native selection would only add an overlay flicker */
-        selectable: false,
-        grabbable: true
-      }
-    ]);
+    const displayStyle = normaliseGroupDisplay(g.displayStyle);
+    const bodyPadding = resolveGroupPadding(g.bodyPadding);
+    const els = memo(
+      groupMemo,
+      g,
+      `${common}|${parent ?? ''}|${count}|${displayStyle}|${bodyPadding}`,
+      () => [
+        {
+          data: {
+            id: groupNodeId(g.id),
+            groupId: g.id,
+            kind: 'group',
+            label: showLabels ? g.name || 'Unnamed Grouping' : '',
+            /* `rectangle` is drawn by Cytoscape; the other two suppress the body
+               here (see style.ts) and are painted by the GroupShapeLayer overlay */
+            displayStyle,
+            /* Cytoscape's compound `padding` *and* the overlay's offset distance:
+               they have to be the same number or the drawn body and the box the
+               title hangs off would not share a top edge */
+            bodyPadding,
+            /* the hit area is the drawn body, which only GroupShapeLayer knows —
+               until the pointer first moves, everything is clickable */
+            bodyHit: 1,
+            /* a grouping that anchors no rooms (every membership is someone
+               else's anchor) is a childless node; GroupBodyStore.apply() places
+               and sizes it to its drawn region each sync. Cytoscape ignores
+               width/height on a compound parent, so this is a safe default for
+               both kinds. */
+            leafW: 60,
+            leafH: 40,
+            /* runtime-owned, written by GroupBodyStore.sync() */
+            titleDx: 0,
+            titleDy: 0,
+            fill: g.color || PALETTE.groupFill,
+            border: g.color || PALETTE.groupBorder,
+            /* the title falls back to the body colour until it is given its own */
+            textColor: g.textColor || g.color || PALETTE.groupBorder,
+            memberCount: count,
+            /* un-wrapped, so it feeds the label ceiling (see viewScale) */
+            labelWidth: rawGroupW * scale,
+            lw: rawGroupW * scale,
+            lh: rawGroupW ? GROUP_LINE_HEIGHT * scale : 0,
+            /* …and these are the *raw* metrics at the base font, with no Base
+               Size folded in: in the skeleton `tView` replaces Base Size rather
+               than multiplying it, so the drawn title is exactly
+               `titleW × tView` wide and `titleH × tView` tall. That identity is
+               what lets the fit below hand the title exactly the space it needs. */
+            titleW: rawGroupW,
+            titleH: rawGroupW ? GROUP_LINE_HEIGHT : 0,
+            /* the raw metrics, which only a rename changes. `titleW`/`titleH`
+               above are the *scaled* ones, owned by the layering pass — they are
+               what the skeleton fit and `text-max-width` read. */
+            titleW0: rawGroupW,
+            titleH0: rawGroupW ? GROUP_LINE_HEIGHT : 0,
+            titleScale: 1,
+            /* neutral defaults; the layering pass refines them after every
+               arrangement (see graph/layering) */
+            zLayer: 1,
+            groupFillOpacity: GROUP_OPACITY.fill,
+            groupBorderOpacity: GROUP_OPACITY.border,
+            /* sub-groupings are simply compound children of their parent */
+            parent,
+            tView: scale,
+            minFontView: 0,
+            skel: 0,
+            boxW: 0,
+            boxH: 0
+          },
+          classes: 'group',
+          /* grouping selection lives in the store and is drawn with `hl-primary`;
+             Cytoscape's native selection would only add an overlay flicker */
+          selectable: false,
+          grabbable: true
+        }
+      ]
+    );
     nodes.push(els[0]);
   }
 
@@ -244,7 +285,10 @@ export function buildElements(
       opts.labelMode === 'all'
         ? (l.labelIds ?? []).map((id) => opts.locationLabelNames?.[id] ?? '').join(',')
         : '';
-    const els = memo(locationMemo, l, `${common}|${parent ?? ''}|${labelSig}`, () => {
+    /* every membership, not just the anchor — the cohesion layout and the
+       overlay's non-anchor bodies both need it, and neither is `parent` */
+    const memberOf = l.groupIds.join(',');
+    const els = memo(locationMemo, l, `${common}|${parent ?? ''}|${memberOf}|${labelSig}`, () => {
       const hasNotes = l.notes.trim().length > 0;
       const shape = normaliseShape(l.kind);
       const size = sizeOf(l);
@@ -294,6 +338,9 @@ export function buildElements(
             /* refined by the layering pass right after every arrangement */
             zLayer: 0,
             parent,
+            /* every grouping this room belongs to, comma-joined — for the
+               layout's cohesion springs and the overlay's non-anchor bodies */
+            memberOf,
             tView: size * scale,
             minFontView: 0,
             skel: 0

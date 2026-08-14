@@ -3,6 +3,7 @@ import type {
   ConnectionLabel,
   GraphMap,
   Group,
+  GroupDisplayStyle,
   Location,
   LocationLabel,
   MapSummary
@@ -11,10 +12,15 @@ import type {
 const iso = (v: Date | string) => (v instanceof Date ? v.toISOString() : String(v));
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
+/** A row written before the column existed reads as the historical behaviour. */
+const displayStyle = (v: unknown): GroupDisplayStyle =>
+  v === 'outline' || v === 'loop' ? v : 'rectangle';
+
 export const mapMap = (r: any): GraphMap => ({
   id: r.id,
   name: r.name,
   description: r.description,
+  startLocationId: r.start_location_id ?? null,
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)
 });
@@ -33,6 +39,8 @@ export const mapGroup = (r: any): Group => ({
   color: r.color,
   textColor: r.text_color,
   notes: r.notes,
+  displayStyle: displayStyle(r.display_style),
+  bodyPadding: num(r.body_padding),
   defaultKind: r.default_kind ?? '',
   defaultSize: num(r.default_size),
   defaultColor: r.default_color ?? '',
@@ -45,7 +53,7 @@ export const mapGroup = (r: any): Group => ({
 export const mapLocation = (r: any): Location => ({
   id: r.id,
   mapId: r.map_id,
-  groupId: r.group_id ?? null,
+  groupIds: (r.group_ids ?? []) as string[],
   name: r.name,
   kind: r.kind,
   size: Number(r.size ?? 1),
@@ -99,8 +107,10 @@ export const mapLocationLabel = (r: any): LocationLabel => ({
   defaultSize: num(r.default_size),
   defaultColor: r.default_color,
   defaultTextColor: r.default_text_color,
-  defaultGroupId: r.default_group_id ?? null,
   overrideGroupings: r.override_groupings ?? false,
+  restartTargets: (r.restart_targets ?? []) as string[],
+  restartName: r.restart_name ?? '',
+  restartWeight: Number(r.restart_weight ?? 1),
   createdAt: iso(r.created_at),
   updatedAt: iso(r.updated_at)
 });

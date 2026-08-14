@@ -1,6 +1,7 @@
 import type {
   Connection,
   ConnectionLabel,
+  GraphMap,
   GraphPayload,
   Group,
   Location,
@@ -41,6 +42,10 @@ export const api = {
   listMaps: () => request<MapSummary[]>('/maps'),
   createMap: (name: string, description = '') => request<MapSummary>('/maps', post({ name, description })),
   deleteMap: (id: string) => request<void>(`/maps/${id}`, del),
+  updateMap: (
+    id: string,
+    body: Partial<Pick<GraphMap, 'name' | 'description' | 'startLocationId'>>
+  ) => request<GraphMap>(`/maps/${id}`, patch(body)),
   getGraph: (id: string) => request<GraphPayload>(`/maps/${id}`),
   exportMap: (id: string) => request<unknown>(`/maps/${id}/export`),
   importMap: (payload: unknown) =>
@@ -60,8 +65,12 @@ export const api = {
   ungroupAll: (id: string) => request<{ released: number }>(`/groups/${id}/ungroup`, post()),
   applyGroupStylingToAll: (id: string) =>
     request<{ locations: Location[] }>(`/groups/${id}/apply`, post()),
-  applyGroupStyling: (locationId: string) =>
-    request<Location>(`/locations/${locationId}/group/apply`, post()),
+  applyGroupStyling: (locationId: string, groupId: string) =>
+    request<Location>(`/locations/${locationId}/groups/${groupId}/apply`, post()),
+  assignLocationGroup: (locationId: string, groupId: string) =>
+    request<Location>(`/locations/${locationId}/groups`, post({ groupId, applyStyling: true })),
+  unassignLocationGroup: (locationId: string, groupId: string) =>
+    request<Location>(`/locations/${locationId}/groups/${groupId}`, del),
 
   /* locations */
   createLocation: (mapId: string, body: Partial<Location>) =>

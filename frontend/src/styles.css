@@ -112,11 +112,16 @@ ul { list-style: none; margin: 0; padding: 0; }
 .badge.connection { color: #d5c1ff; border-color: #4a3e6b; }
 
 /* ---------------------------------------------------------------- canvas */
-.graph-canvas { position: relative; flex: 1; min-height: 0; }
-.cy-host {
-  position: absolute; inset: 0;
+.graph-canvas {
+  position: relative; flex: 1; min-height: 0;
+  /* the backdrop lives here, not on .cy-host: the grouping overlay is a
+     positioned sibling *before* the host, so an opaque host would hide it */
   background: radial-gradient(circle at 35% 20%, var(--canvas-1) 0%, var(--canvas-2) 100%);
 }
+.cy-host { position: absolute; inset: 0; }
+/* Cytoscape's own canvases are transparent and come later in the DOM, so this
+   paints underneath every node, edge and label without any z-index at all. */
+.group-shape-layer { position: absolute; inset: 0; pointer-events: none; }
 .graph-canvas.mode-add-location .cy-host { cursor: crosshair; }
 .graph-canvas.mode-connect .cy-host { cursor: alias; }
 .canvas-hint {
@@ -215,6 +220,8 @@ ul { list-style: none; margin: 0; padding: 0; }
   background: rgba(143, 167, 196, 0.25);
   border: 2px solid #5d7a9e; border-radius: 6px;
 }
+.swatch.group.outline { border-radius: 0; border-style: solid; }
+.swatch.group.loop { background: none; border-radius: 0; border-width: 4px; }
 button.link.subtle { font-size: 12px; color: var(--accent); padding: 0 2px; }
 
 /* ------------------------------------------------- marquee / multi select */
@@ -368,3 +375,71 @@ button.link.subtle { font-size: 12px; color: var(--accent); padding: 0 2px; }
 }
 .trip-running { display: flex; flex-direction: column; gap: 6px; align-items: stretch; font-size: 12px; }
 .trip-running .pulse { color: #c9b8ff; text-align: center; }
+
+/* ------------------------------------------- pick-from-canvas & entity picker */
+.graph-canvas.picking .cy-host { cursor: crosshair; }
+
+.canvas-hint.picking-hint {
+  display: flex; align-items: center; gap: 10px;
+  border-color: var(--gold); color: var(--gold);
+}
+.canvas-hint.picking-hint .hint-btn {
+  padding: 2px 8px; font-size: 11px; color: var(--fg);
+  background: #0b0e1466; border-color: var(--line);
+}
+.canvas-hint.picking-hint .hint-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.picker.armed { border-color: var(--gold); color: var(--gold); }
+
+.menu-panel.picker-popover {
+  width: 340px; max-width: 92vw; padding: 8px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.picker-popover .picker-search { width: 100%; text-align: left; }
+
+.picker-scopes { display: flex; gap: 4px; }
+.picker-scopes .scope-chip {
+  flex: 1; padding: 3px 4px; font-size: 11px; border-radius: 12px;
+  background: var(--bg); color: var(--muted);
+}
+.picker-scopes .scope-chip.active { color: var(--gold); border-color: var(--gold); }
+
+.picker-results {
+  max-height: 260px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+}
+.picker-results li { display: block; border-bottom: 1px solid #1b2331; }
+.picker-results li:last-child { border-bottom: none; }
+.picker-result {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; border-radius: 0; text-align: left; padding: 5px 8px;
+}
+.picker-result:hover:not(:disabled), .picker-result.active { background: var(--bg-3); }
+.picker-result.active { box-shadow: inset 2px 0 0 var(--accent); }
+.picker-result.taken { opacity: 0.45; cursor: not-allowed; }
+.picker-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.picker-text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.picker-text .hit-title, .picker-text .small {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.picker-empty { padding: 12px; text-align: center; }
+
+.picker-foot { display: flex; gap: 6px; flex-wrap: wrap; }
+.picker-foot button { flex: 1; font-size: 12px; padding: 5px 8px; }
+.picker-foot .picker-canvas-btn { flex-basis: 100%; color: var(--gold); border-color: #6b5230; }
+.picker-foot .picker-canvas-btn:hover { border-color: var(--gold); }
+.picker-note { margin: 0; text-align: center; }
+
+/* ------------------------------------------ default trip start & restarts */
+.trip-list .star { color: var(--gold); }
+
+.trip-restart { border-left: 2px dashed #2d5070; padding-left: 6px; }
+.trip-restart > .link .hit-title { color: #9ad1ff; }
+
+.restart-row .hit-title { color: #9ad1ff; }
+.restart-list .restart-glyph { color: #9ad1ff; flex: 0 0 auto; }
+.restart-list li .link { width: auto; flex: 1; }
+
+.chip-note {
+  flex: 0 0 auto; font-size: 12px; color: #9ad1ff; cursor: help; line-height: 1;
+}

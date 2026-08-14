@@ -1,5 +1,24 @@
 import type { ReactNode } from 'react';
 
+/** The heading carries the meaning; the detail lives one hover away. */
+export function Help({ text }: { text: string }) {
+  return (
+    <span
+      className="help"
+      title={text}
+      aria-label={text}
+      onClick={(e) => {
+        /* a Help badge often sits inside a <label>; without this a click toggles
+           the sibling control instead of just showing the tooltip */
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      ?
+    </span>
+  );
+}
+
 /** Caption above a checkbox, both inside a real <label> so the text is clickable. */
 export function CheckField({
   label,
@@ -104,27 +123,38 @@ export function OptionalColorField({
 export function LabelChips({
   labels,
   onApply,
-  onRemove
+  onRemove,
+  note
 }: {
   labels: Array<{ id: string; name: string; color: string }>;
   onApply: (id: string) => void;
   onRemove: (id: string) => void;
+  /** Optional annotation, e.g. the restarts a label grants. */
+  note?: (id: string) => string | undefined;
 }) {
   if (!labels.length) return <p className="muted small">No Labels Applied.</p>;
   return (
     <ul className="chip-list">
-      {labels.map((l) => (
-        <li key={l.id} className="chip">
-          <span className="chip-dot" style={{ background: l.color || '#8897ad' }} />
-          <span className="chip-name">{l.name || 'Unnamed Label'}</span>
-          <button className="chip-btn" title="Apply This Label's Styling" onClick={() => onApply(l.id)}>
-            Apply
-          </button>
-          <button className="chip-btn danger" title="Remove Label" onClick={() => onRemove(l.id)}>
-            ✕
-          </button>
-        </li>
-      ))}
+      {labels.map((l) => {
+        const hint = note?.(l.id);
+        return (
+          <li key={l.id} className="chip">
+            <span className="chip-dot" style={{ background: l.color || '#8897ad' }} />
+            <span className="chip-name">{l.name || 'Unnamed Label'}</span>
+            {hint && (
+              <span className="chip-note" title={hint}>
+                ↻
+              </span>
+            )}
+            <button className="chip-btn" title="Apply This Label's Styling" onClick={() => onApply(l.id)}>
+              Apply
+            </button>
+            <button className="chip-btn danger" title="Remove Label" onClick={() => onRemove(l.id)}>
+              ✕
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }

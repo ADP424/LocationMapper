@@ -83,13 +83,40 @@ export async function replaceRequirements(
   );
 }
 
+/**
+ * Replace a label's restart targets in one statement. A restart is *structure*,
+ * not styling: nothing in styling.ts ever touches it, and nothing stamps it onto
+ * a room — it is a property of the label itself.
+ */
+export async function replaceRestartTargets(
+  client: PoolClient,
+  labelId: string,
+  locationIds: string[]
+) {
+  await client.query(`DELETE FROM location_label_restarts WHERE label_id = $1`, [labelId]);
+  const unique = [...new Set(locationIds)];
+  if (!unique.length) return;
+  await client.query(
+    `INSERT INTO location_label_restarts (label_id, location_id)
+     SELECT $1, id FROM unnest($2::uuid[]) AS t(id)
+     ON CONFLICT DO NOTHING`,
+    [labelId, unique]
+  );
+}
+
 /* -------------------------------------------------------------- fetching */
 
 const LOCATION_SQL = `
   SELECT l.*,
          COALESCE((SELECT array_agg(a.label_id ORDER BY a.applied_at, a.label_id)
                      FROM location_label_assignments a
-                    WHERE a.location_id = l.id), '{}') AS label_ids
+                    WHERE a.location_id = l.id), '{}') AS label_ids,
+         /* oldest first: [0] is the layout anchor. \`seq\` — not just \`added_at\` —
+            breaks ties between rows inserted in the same statement/transaction,
+            which share one timestamp (a bulk import, a multi-membership create) */
+         COALESCE((SELECT array_agg(a.group_id ORDER BY a.added_at, a.seq)
+                     FROM location_group_assignments a
+                    WHERE a.location_id = l.id), '{}') AS group_ids
     FROM locations l
 `;
 
@@ -110,6 +137,15 @@ const CONNECTION_LABEL_SQL = `
                      FROM connection_label_requirements r
                     WHERE r.label_id = cl.id), '{}') AS default_requires
     FROM connection_labels cl
+`;
+
+const LOCATION_LABEL_SQL = `
+  SELECT ll.*,
+         /* ordered, so a PATCH that only reorders is never reported as a change */
+         COALESCE((SELECT array_agg(r.location_id ORDER BY r.location_id)
+                     FROM location_label_restarts r
+                    WHERE r.label_id = ll.id), '{}') AS restart_targets
+    FROM location_labels ll
 `;
 
 export async function fetchLocation(id: string, client?: PoolClient): Promise<Location> {
@@ -136,9 +172,12 @@ export async function fetchLocationsByLabel(labelId: string): Promise<Location[]
 }
 
 export async function fetchLocationsByGroup(groupId: string): Promise<Location[]> {
-  const { rows } = await pool.query(`${LOCATION_SQL} WHERE l.group_id = $1 ORDER BY l.created_at`, [
-    groupId
-  ]);
+  const { rows } = await pool.query(
+    `${LOCATION_SQL}
+      WHERE l.id IN (SELECT location_id FROM location_group_assignments WHERE group_id = $1)
+      ORDER BY l.created_at`,
+    [groupId]
+  );
   return rows.map(mapLocation);
 }
 
@@ -167,14 +206,14 @@ export async function fetchConnectionsByLabel(labelId: string): Promise<Connecti
 
 export async function fetchLocationLabels(mapId: string): Promise<LocationLabel[]> {
   const { rows } = await pool.query(
-    `SELECT * FROM location_labels WHERE map_id = $1 ORDER BY name, created_at`,
+    `${LOCATION_LABEL_SQL} WHERE ll.map_id = $1 ORDER BY ll.name, ll.created_at`,
     [mapId]
   );
   return rows.map(mapLocationLabel);
 }
 
 export async function fetchLocationLabel(id: string): Promise<LocationLabel> {
-  const { rows } = await pool.query(`SELECT * FROM location_labels WHERE id = $1`, [id]);
+  const { rows } = await pool.query(`${LOCATION_LABEL_SQL} WHERE ll.id = $1`, [id]);
   if (!rows.length) throw notFound('location label');
   return mapLocationLabel(rows[0]);
 }

@@ -99,7 +99,7 @@ export default function SearchPanel() {
         let s = score(g.name, 1);
         if (includeNotes) s += score(g.notes, 0.2);
         if (s > 0) {
-          const count = Object.values(locations).filter((l) => l.groupId === g.id).length;
+          const count = Object.values(locations).filter((l) => l.groupIds.includes(g.id)).length;
           out.push({
             kind: 'group',
             id: g.id,

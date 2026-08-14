@@ -41,14 +41,18 @@ export async function seedDemoMap() {
 
     const id = new Map<string, string>();
     for (const r of rooms) {
-      id.set(
-        r.name,
-        await insert(
-          `INSERT INTO locations (map_id, group_id, name, kind, size, notes, visited, x, y)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-          [mapId, r.group, r.name, r.kind, r.size, r.notes, r.visited, r.x, r.y]
-        )
+      const locId = await insert(
+        `INSERT INTO locations (map_id, name, kind, size, notes, visited, x, y)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [mapId, r.name, r.kind, r.size, r.notes, r.visited, r.x, r.y]
       );
+      id.set(r.name, locId);
+      if (r.group) {
+        await client.query(
+          `INSERT INTO location_group_assignments (location_id, group_id) VALUES ($1,$2)`,
+          [locId, r.group]
+        );
+      }
     }
 
     const links: Array<{

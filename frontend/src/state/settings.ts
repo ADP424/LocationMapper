@@ -66,6 +66,14 @@ export interface Settings {
   limitSearchTime: boolean;
   /** Whole seconds. */
   searchTimeLimitSeconds: number;
+  /**
+   * Recompute `coordinateUnit` from the map's own spacing needs on every
+   * coordinate-grid re-layout. On, the field below is read-only output; off,
+   * it is the fixed pixel spacing the next re-layout uses instead.
+   */
+  autoCoordinateUnit: boolean;
+  /** Pixels between two adjacent coordinates on a coordinate-grid layout. */
+  coordinateUnit: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -84,7 +92,9 @@ export const DEFAULT_SETTINGS: Settings = {
   skeletonLineWidth: 1.5,
   allowSkeletonZoom: true,
   limitSearchTime: true,
-  searchTimeLimitSeconds: 10
+  searchTimeLimitSeconds: 10,
+  autoCoordinateUnit: true,
+  coordinateUnit: 48
 };
 
 export const SKELETON_LINE_WIDTH_RANGE = [0.75, 6] as const;
@@ -92,6 +102,8 @@ export const SKELETON_LINE_WIDTH_RANGE = [0.75, 6] as const;
 export const BASE_SCALE_RANGE = [0.5, 4] as const;
 /** A location's own scalar. Past ~10:1 the 1x rooms go sub-pixel once the big one is clamped. */
 export const LOCATION_SIZE_MAX = 10;
+
+export const COORDINATE_UNIT_RANGE = [16, 2000] as const;
 
 /* `baseScale` used to scale boxes; it no longer does, so a legacy value is not
    a sensible carry-over — it is reset to the new neutral default instead. */
@@ -158,6 +170,12 @@ export function normaliseSettings(
     limitSearchTime: s?.limitSearchTime ?? DEFAULT_SETTINGS.limitSearchTime,
     searchTimeLimitSeconds: Math.round(
       clamp(Number(s?.searchTimeLimitSeconds ?? DEFAULT_SETTINGS.searchTimeLimitSeconds), 1, 3600)
+    ),
+    autoCoordinateUnit: s?.autoCoordinateUnit ?? DEFAULT_SETTINGS.autoCoordinateUnit,
+    coordinateUnit: clamp(
+      Number(s?.coordinateUnit ?? DEFAULT_SETTINGS.coordinateUnit),
+      COORDINATE_UNIT_RANGE[0],
+      COORDINATE_UNIT_RANGE[1]
     )
   };
 }

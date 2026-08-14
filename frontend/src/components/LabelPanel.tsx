@@ -69,6 +69,11 @@ export default function LabelPanel() {
               </span>
               <span className="muted small">
                 {locCounts.get(l.id) ?? 0} {(locCounts.get(l.id) ?? 0) === 1 ? 'Room' : 'Rooms'}
+                {l.restartTargets.length
+                  ? ` · ↻ Restarts To ${l.restartTargets.length} ${
+                      l.restartTargets.length === 1 ? 'Location' : 'Locations'
+                    }`
+                  : ''}
               </span>
             </button>
           </li>

@@ -1,4 +1,4 @@
-import type { Connection } from '../types';
+import type { Connection, GroupDisplayStyle } from '../types';
 
 /* ----------------------------------------------------------------- palette */
 export const PALETTE = {
@@ -168,4 +168,72 @@ export function directionGlyph(c: Pick<Connection, 'arrowSource' | 'arrowTarget'
 export function weightToWidth(weight: number): number {
   const w = Number.isFinite(weight) && weight > 0 ? weight : 1;
   return Math.min(14, Math.max(1.5, 1.6 + 1.9 * Math.log2(1 + w)));
+}
+
+/* ------------------------------------------------- grouping display styles */
+
+export const GROUP_DISPLAY_STYLES: GroupDisplayStyle[] = ['rectangle', 'outline', 'loop'];
+
+export const GROUP_DISPLAY_LABELS: Record<GroupDisplayStyle, string> = {
+  rectangle: 'Rectangle (Whole Area)',
+  outline: 'Form-Fitted Outline',
+  loop: 'Snake Loop'
+};
+
+export const GROUP_DISPLAY_HELP: Record<GroupDisplayStyle, string> = {
+  rectangle: 'One translucent box over everything inside, however it is arranged.',
+  outline:
+    'Traces the rooms in hard right angles, branching along the shortest corridors needed to keep the whole shape in one piece.',
+  loop: 'A single rectangular band threaded through every room and back to itself.'
+};
+
+/** Anything unknown — including a row written before the column existed. */
+export const normaliseGroupDisplay = (v: string): GroupDisplayStyle =>
+  (GROUP_DISPLAY_STYLES as string[]).includes(v) ? (v as GroupDisplayStyle) : 'rectangle';
+
+/**
+ * How far a grouping's drawn body reaches past its rooms. This is Cytoscape's
+ * compound `padding`, so it is also the gap a sub-grouping gets inside its
+ * parent — and, because the outline's corridors and the snake's band are both
+ * built by offsetting a zero-thickness skeleton by exactly this much, it is the
+ * thickness of those too. One number, three meanings, all of them the same idea.
+ */
+export const DEFAULT_GROUP_PADDING = 30;
+export const GROUP_PADDING_RANGE = [0, 400] as const;
+
+/** NULL = "use the default" — resolved once, at the boundary; nothing past
+ *  `buildElements` ever sees a null padding. */
+export const resolveGroupPadding = (v: number | null): number =>
+  v !== null && Number.isFinite(v) && v >= 0
+    ? Math.min(GROUP_PADDING_RANGE[1], v)
+    : DEFAULT_GROUP_PADDING;
+
+/* ------------------------------------------------- grouping title scaling */
+
+/**
+ * A grouping's title is a landmark, and a landmark's size should say something
+ * about the thing it marks. The title therefore scales with the grouping's
+ * *total rectangular footprint* — its bounds, not the area its body happens to
+ * fill, so that switching between Rectangle, Outline and Snake Loop never
+ * changes the lettering.
+ *
+ * The fourth root of area (≡ the square root of a side length) keeps a 100×
+ * difference in area down to a 3.2× difference in title: big groupings read as
+ * big, and a continent's name does not swallow the map.
+ *
+ * This scale never reaches the zoomed-out skeleton. `titleW`/`titleH` carry it,
+ * and the skeleton fit divides by them — so `15 × titleScale × tView` is
+ * independent of `titleScale` once the title is fitted to the box. The skeleton
+ * title is sized by the grouping's total bounds, and by nothing else.
+ */
+export const TITLE_REF_AREA = 120_000; // a comfortable six-room grouping…
+export const TITLE_REF_SCALE = 3; // …gets a title 3× a room's name
+export const TITLE_SCALE_RANGE = [1, 8] as const;
+
+export function titleScaleForArea(area: number): number {
+  if (!Number.isFinite(area) || area <= 0) return TITLE_SCALE_RANGE[0];
+  const raw = TITLE_REF_SCALE * Math.pow(area / TITLE_REF_AREA, 0.25);
+  const clamped = Math.min(TITLE_SCALE_RANGE[1], Math.max(TITLE_SCALE_RANGE[0], raw));
+  /* two decimals: a sub-pixel wobble in the footprint must not restyle the map */
+  return Math.round(clamped * 100) / 100;
 }

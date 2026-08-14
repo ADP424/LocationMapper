@@ -3,9 +3,7 @@ import type { PoolClient } from 'pg';
 import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
 import { applyConnectionLabel, applyLocationLabel } from '../styling';
-import { mapLocationLabel } from '../mappers';
 import {
-  assertGroupOnMap,
   assertLocationsOnMap,
   fetchConnection,
   fetchConnectionLabel,
@@ -15,6 +13,7 @@ import {
   fetchLocationsByLabel,
   mapIdOf,
   replaceRequirements,
+  replaceRestartTargets,
   type MapOwnedTable
 } from '../repo';
 import { insertSql, updateSql } from '../sql';
@@ -167,7 +166,7 @@ registerLabelRoutes({
 });
 
 /* ============================================================ location labels */
-
+/** `restartTargets` is a join table, so it never appears here. */
 const locationLabelColumns = (b: ReturnType<typeof locationLabelCreate.parse>) => ({
   name: b.name,
   color: b.color,
@@ -176,8 +175,9 @@ const locationLabelColumns = (b: ReturnType<typeof locationLabelCreate.parse>) =
   default_size: b.defaultSize,
   default_color: b.defaultColor,
   default_text_color: b.defaultTextColor,
-  default_group_id: b.defaultGroupId,
-  override_groupings: b.overrideGroupings
+  override_groupings: b.overrideGroupings,
+  restart_name: b.restartName,
+  restart_weight: b.restartWeight
 });
 
 labelsRouter.post(
@@ -185,15 +185,19 @@ labelsRouter.post(
   ah(async (req, res) => {
     const mapId = uuid.parse(req.params.mapId);
     const b = locationLabelCreate.parse(req.body);
-    if (b.defaultGroupId) await assertGroupOnMap(b.defaultGroupId, mapId);
-
-    const stmt = insertSql('location_labels', {
-      map_id: mapId,
-      ...locationLabelColumns(b),
-      name: b.name ?? 'New Label'
+    await assertLocationsOnMap(mapId, b.restartTargets ?? []);
+    const id = await withTransaction(async (client) => {
+      const stmt = insertSql(
+        'location_labels',
+        { map_id: mapId, ...locationLabelColumns(b), name: b.name ?? 'New Label' },
+        'id'
+      );
+      const { rows } = await client.query(stmt.text, stmt.values);
+      const id = rows[0].id as string;
+      if (b.restartTargets?.length) await replaceRestartTargets(client, id, b.restartTargets);
+      return id;
     });
-    const { rows } = await query(stmt.text, stmt.values);
-    res.status(201).json(mapLocationLabel(rows[0]));
+    res.status(201).json(await fetchLocationLabel(id));
   })
 );
 
@@ -203,10 +207,16 @@ labelsRouter.patch(
     const id = uuid.parse(req.params.id);
     const b = locationLabelUpdate.parse(req.body);
     const mapId = await mapIdOf('location_labels', id);
-    if (b.defaultGroupId) await assertGroupOnMap(b.defaultGroupId, mapId);
-
-    const stmt = updateSql('location_labels', id, locationLabelColumns(b));
-    if (stmt) await query(stmt.text, stmt.values);
+    if (b.restartTargets) await assertLocationsOnMap(mapId, b.restartTargets);
+    await withTransaction(async (client) => {
+      const stmt = updateSql('location_labels', id, locationLabelColumns(b));
+      if (stmt) await client.query(stmt.text, stmt.values);
+      if (b.restartTargets) {
+        await replaceRestartTargets(client, id, b.restartTargets);
+        /* the join table has no trigger of its own, and "Updated …" is shown */
+        if (!stmt) await client.query(`UPDATE location_labels SET name = name WHERE id = $1`, [id]);
+      }
+    });
     res.json(await fetchLocationLabel(id));
   })
 );

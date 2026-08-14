@@ -3,6 +3,7 @@ import type { Group, Location } from '../types';
 import { coordValue, offPlaneAxis, type CoordinatePlane } from './coordinateLayout';
 import { groupNodeId } from './elements';
 import { buildGroupTree, type GroupTreeNode } from './groups';
+import { DEFAULT_GROUP_PADDING, titleScaleForArea } from './model';
 import { layoutSpan } from './viewScale';
 
 export interface GroupLayer {
@@ -22,24 +23,38 @@ const BORDER_OPACITY = [0.35, 1] as const;
 const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
 const pretty = (n: number) => String(Math.round(n * 100) / 100);
 
-/** Groupings are padding around their children; `groupLayout` uses the same figure. */
-const GROUP_PADDING = 34;
-
 /** A write that changes nothing still restyles the element. */
 const setData = (node: NodeSingular, key: string, value: number) => {
   if (node.data(key) !== value) node.data(key, value);
 };
 
 /**
- * A grouping's footprint from *base* geometry — position plus each child's
+ * A grouping's footprint from *base* geometry — position plus each member's
  * `layoutSpan` (box or name plate, whichever is bigger), never drawn geometry
- * — so it is correct even for children the ViewScaler has left stale
- * off-screen, and costs one pass over each grouping's own children instead of
+ * — so it is correct even for members the ViewScaler has left stale
+ * off-screen, and costs one pass over each grouping's own members instead of
  * a `boundingBox()` compound-bounds recalc over its whole subtree.
+ *
+ * Members come from the membership map, not `children()`: a non-anchor member
+ * reaches the grouping's footprint without being its compound child. Ephemeral
+ * stubs are never themselves a membership — they still come from the compound
+ * tree, riding their anchor room's.
  */
+/** The title is sized from the grouping's total footprint, and nothing else. */
+function applyTitleScale(g: NodeSingular, area: number) {
+  const scale = titleScaleForArea(area);
+  setData(g, 'titleScale', scale);
+  setData(g, 'titleW', ((g.data('titleW0') as number) || 0) * scale);
+  setData(g, 'titleH', ((g.data('titleH0') as number) || 0) * scale);
+}
+
 /** Areas for the stacking order, and the box itself (published to `boxW`/
  *  `boxH`) for the skeleton view's title fit. */
-function measureGroupAreas(cy: Core, tree: GroupTreeNode[]): Map<string, number> {
+function measureGroupAreas(
+  cy: Core,
+  tree: GroupTreeNode[],
+  members: Map<string, string[]>
+): Map<string, number> {
   const areas = new Map<string, number>();
   const walk = (node: GroupTreeNode): { x1: number; y1: number; x2: number; y2: number } | null => {
     let box: { x1: number; y1: number; x2: number; y2: number } | null = null;
@@ -52,32 +67,44 @@ function measureGroupAreas(cy: Core, tree: GroupTreeNode[]): Map<string, number>
       const b = walk(child);
       if (b) grow(b.x1, b.y1, b.x2, b.y2);
     }
+    for (const id of members.get(node.group.id) ?? []) {
+      const n = cy.getElementById(id);
+      if (n.empty()) continue;
+      const p = n.position();
+      const { w, h } = layoutSpan(n);
+      grow(p.x - w / 2, p.y - h / 2, p.x + w / 2, p.y + h / 2);
+    }
     cy.getElementById(groupNodeId(node.group.id))
-      .children('node.location, node.portal')
+      .children('node.portal')
       .forEach((n) => {
         const p = n.position();
         const { w, h } = layoutSpan(n);
         grow(p.x - w / 2, p.y - h / 2, p.x + w / 2, p.y + h / 2);
       });
     const g = cy.getElementById(groupNodeId(node.group.id));
+    /* the grouping's own drawn padding — the footprint the user actually sees */
+    const padRaw = g.data('bodyPadding') as number;
+    const pad = Number.isFinite(padRaw) && padRaw >= 0 ? padRaw : DEFAULT_GROUP_PADDING;
     if (box) {
       const b = box as { x1: number; y1: number; x2: number; y2: number };
       const out = {
-        x1: b.x1 - GROUP_PADDING,
-        y1: b.y1 - GROUP_PADDING,
-        x2: b.x2 + GROUP_PADDING,
-        y2: b.y2 + GROUP_PADDING
+        x1: b.x1 - pad,
+        y1: b.y1 - pad,
+        x2: b.x2 + pad,
+        y2: b.y2 + pad
       };
       const gw = out.x2 - out.x1;
       const gh = out.y2 - out.y1;
       areas.set(node.group.id, gw * gh);
       setData(g, 'boxW', gw);
       setData(g, 'boxH', gh);
+      applyTitleScale(g, gw * gh);
       return out;
     }
     areas.set(node.group.id, 0);
     setData(g, 'boxW', 0);
     setData(g, 'boxH', 0);
+    applyTitleScale(g, 0);
     return null;
   };
   tree.forEach(walk);
@@ -109,10 +136,11 @@ export function computeGroupLayers(
 
   const roomsOf = new Map<string, Location[]>();
   for (const l of locations) {
-    if (!l.groupId) continue;
-    const list = roomsOf.get(l.groupId);
-    if (list) list.push(l);
-    else roomsOf.set(l.groupId, [l]);
+    for (const gid of l.groupIds) {
+      const list = roomsOf.get(gid);
+      if (list) list.push(l);
+      else roomsOf.set(gid, [l]);
+    }
   }
 
   /* a compound node's box is its contents plus padding, so this is the real
@@ -122,7 +150,11 @@ export function computeGroupLayers(
      children. The footprint is exactly the union of the member rooms' base
      boxes, which is already known from `data.w/h`. */
   const tree = buildGroupTree(drawn);
-  const areaOf = measureGroupAreas(cy, tree);
+  const areaOf = measureGroupAreas(
+    cy,
+    tree,
+    new Map([...roomsOf].map(([gid, rooms]) => [gid, rooms.map((r) => r.id)]))
+  );
 
   /** Mean off-plane coordinate of every room nested inside, or null if none has one. */
   const coordOf = new Map<string, number | null>();

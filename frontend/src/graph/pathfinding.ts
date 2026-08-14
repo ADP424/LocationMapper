@@ -32,6 +32,9 @@ export interface RouteStep {
   locked?: boolean;
   prerequisites?: string[];
   unlocks?: string[];
+  /** A label-granted restart, not a drawn connection. */
+  restart?: boolean;
+  restartLabelId?: string;
 }
 
 export interface DetourPickup {
@@ -47,6 +50,7 @@ export interface RouteLeg {
   hops: number;
   weight: number;
   coordChange: number;
+  restarts: number;
   detours: DetourPickup[];
 }
 
@@ -72,6 +76,7 @@ export interface RoutePlan {
   hops: number;
   weight: number;
   coordChange: number;
+  restarts: number;
   locationIds: string[];
   connectionIds: string[];
   detourIds: string[];
@@ -100,6 +105,9 @@ export interface PlannerConnection {
   weight: number;
   locked: boolean;
   requires: string[];
+  /** Synthetic, label-granted, never locked, never drawn. */
+  restart?: boolean;
+  restartLabelId?: string;
 }
 
 export interface PlannerBudget {
@@ -223,6 +231,7 @@ function emptyPlan(mode: RouteMode, outcome: RouteOutcome): RoutePlan {
     hops: 0,
     weight: 0,
     coordChange: 0,
+    restarts: 0,
     locationIds: [],
     connectionIds: [],
     detourIds: [],
@@ -311,7 +320,9 @@ export async function planRoute(
     const dirs = traversalDirections(c); // no arrowheads = walkable both ways
     if (!dirs.forward && !dirs.backward) return;
 
-    const weight = Number.isFinite(c.weight) && c.weight > 0 ? c.weight : 1;
+    /* >= 0, not > 0: a restart may be declared free. The DB still forbids a
+       zero-weight *connection*, so nothing real changes here. */
+    const weight = Number.isFinite(c.weight) && c.weight >= 0 ? c.weight : 1;
     const coord = coordChangeBetween(locations[s], locations[t], axes);
     const cost = mode === 'weight' ? weight : mode === 'coords' ? coord + HOP_EPSILON : 1;
     if (dirs.forward) pushArc(s, t, ci, weight, coord, cost);
@@ -668,13 +679,19 @@ export async function planRoute(
   const steps: RouteStep[] = [];
   for (let id = finalState; id >= 0 && stPrev[id] >= 0; id = stPrev[id]) {
     const ai = stArc[id];
-    steps.push({
-      connectionId: connections[arcConn[ai]].id,
+    const c = connections[arcConn[ai]];
+    const step: RouteStep = {
+      connectionId: c.id,
       fromId: locations[arcFrom[ai]].id,
       toId: locations[arcTo[ai]].id,
       weight: arcWeight[ai],
       coordChange: arcCoord[ai]
-    });
+    };
+    if (c.restart) {
+      step.restart = true;
+      step.restartLabelId = c.restartLabelId;
+    }
+    steps.push(step);
   }
   steps.reverse();
 
@@ -711,6 +728,7 @@ export async function planRoute(
     hops: legSteps.length,
     weight: legSteps.reduce((a, s) => a + s.weight, 0),
     coordChange: legSteps.reduce((a, s) => a + s.coordChange, 0),
+    restarts: legSteps.reduce((a, s) => a + (s.restart ? 1 : 0), 0),
     detours: legSteps
       .filter((s) => s.unlocks && s.unlocks.length)
       .map((s) => ({ locationId: s.toId, opens: s.unlocks! }))
@@ -736,6 +754,7 @@ export async function planRoute(
       hops: 0,
       weight: 0,
       coordChange: 0,
+      restarts: 0,
       detours: []
     });
     idx++;
@@ -762,6 +781,9 @@ export async function planRoute(
   waypoints.forEach(addLoc);
   for (const s of steps) {
     addLoc(s.toId);
+    /* a restart has no edge on the canvas; handing its id to the highlighter
+       would be a lookup that can only ever miss */
+    if (s.restart) continue;
     if (!seenConn.has(s.connectionId)) {
       seenConn.add(s.connectionId);
       connectionIds.push(s.connectionId);
@@ -782,6 +804,7 @@ export async function planRoute(
     hops: legs.reduce((a, l) => a + l.hops, 0),
     weight: legs.reduce((a, l) => a + l.weight, 0),
     coordChange: legs.reduce((a, l) => a + l.coordChange, 0),
+    restarts: legs.reduce((a, l) => a + l.restarts, 0),
     locationIds,
     connectionIds,
     detourIds,

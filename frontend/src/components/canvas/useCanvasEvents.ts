@@ -10,11 +10,59 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
     if (!handle) return;
     const { cy } = handle;
 
+    /**
+     * While a picker is armed the canvas is a chooser and nothing else: a tap
+     * answers the request. It never changes the selection, never advances a
+     * connect step, and never deselects — the panel that asked the question is
+     * still open behind it, and must stay that way.
+     *
+     * Returns true when the tap was consumed.
+     */
+    const answerPick = (ev: any): boolean => {
+      const store = useGraphStore.getState();
+      const pick = store.pick;
+      if (!pick) return false;
+      const node = ev.target;
+      store.closeContextMenu();
+
+      if (node.hasClass('handle') || node.hasClass('ghost')) return true;
+
+      if (node.hasClass('portal')) {
+        store.resolvePick('connection', node.data('connectionId'));
+        return true;
+      }
+
+      if (node.hasClass('group')) {
+        /* same redirect as a normal tap: a room, a name plate or a stub under
+           the pointer outranks the grouping body it happens to sit on */
+        const hit = resolveLocationHit(handle, ev.position);
+        if (hit?.hasClass('portal')) store.resolvePick('connection', hit.data('connectionId'));
+        else if (hit && pick.kind !== 'group') store.resolvePick('location', hit.id());
+        else store.resolvePick('group', node.data('groupId'));
+        return true;
+      }
+
+      /* clicking a room while picking a grouping means "the one around it" */
+      if (pick.kind === 'group') {
+        const parent = node.parent();
+        if (parent.nonempty() && parent.data('groupId')) {
+          store.resolvePick('group', parent.data('groupId'));
+          return true;
+        }
+      }
+
+      store.resolvePick('location', node.id());
+      return true;
+    };
+
     const onNodeTap = (ev: any) => {
+      if (answerPick(ev)) return;
+
       const node = ev.target;
       const store = useGraphStore.getState();
       store.closeContextMenu();
       if (node.hasClass('handle')) return;
+
       if (node.hasClass('group')) {
         /* locations and connections always outrank a grouping: redirect the
            tap if anything is really under the pointer (a shape's dead corner,
@@ -35,10 +83,12 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
         store.selectGroup(node.data('groupId'));
         return;
       }
+
       if (node.hasClass('portal')) {
         store.selectConnection(node.data('connectionId'));
         return;
       }
+
       if (store.mode === 'connect') {
         void store.handleConnectClick(node.id());
         return;
@@ -49,13 +99,24 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
     const onEdgeTap = (ev: any) => {
       const store = useGraphStore.getState();
       store.closeContextMenu();
-      store.selectConnection(ev.target.data('connectionId') ?? ev.target.id());
+      const cid = ev.target.data('connectionId') ?? ev.target.id();
+      if (store.pick) {
+        store.resolvePick('connection', cid);
+        return;
+      }
+      store.selectConnection(cid);
     };
 
     const onCoreTap = (ev: any) => {
       if (ev.target !== cy) return;
       const store = useGraphStore.getState();
       store.closeContextMenu();
+
+      /* empty space means "never mind" — same as it does for connect mode */
+      if (store.pick) {
+        store.cancelPick();
+        return;
+      }
       if (store.mode === 'add-location') {
         void store.createLocationAt(ev.position.x, ev.position.y);
         return;
@@ -68,7 +129,11 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
       store.select(null);
     };
 
-    const onDblClick = (ev: any) => void useGraphStore.getState().toggleVisited(ev.target.id());
+    const onDblClick = (ev: any) => {
+      /* the first tap already answered a pick; don't also flip Visited */
+      if (useGraphStore.getState().pick) return;
+      void useGraphStore.getState().toggleVisited(ev.target.id());
+    };
 
     /* groupings, multi-selections and ephemeral stubs all persist their drags */
     const onDragFree = (ev: any) => {
@@ -85,6 +150,7 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
         handle.sync();
         return;
       }
+
       if (node.hasClass('portal')) {
         const anchor = cy.getElementById(node.data('anchorId'));
         if (anchor.empty()) return;
@@ -97,6 +163,7 @@ export function useCanvasEvents(handle: CanvasHandle | null) {
         handle.sync({ rooms: false });
         return;
       }
+
       const selected = cy.nodes('.location:selected');
       if (node.selected() && selected.length > 1) {
         store.queuePositions(

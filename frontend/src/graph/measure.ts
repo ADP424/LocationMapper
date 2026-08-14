@@ -3,6 +3,8 @@
 export const EDGE_LABEL_FONT = '11px Inter, system-ui, -apple-system, sans-serif';
 export const NODE_LABEL_FONT = '12px Inter, system-ui, -apple-system, sans-serif';
 export const PORTAL_LABEL_FONT = 'italic 10px Inter, system-ui, -apple-system, sans-serif';
+/** The font `titleW`/`titleH` are measured at. The *drawn* size is
+ *  `15 × titleScale × tView` — see `titleScaleForArea` in graph/model. */
 export const GROUP_LABEL_FONT = 'bold 15px Inter, system-ui, -apple-system, sans-serif';
 
 /** Matches the `line-height` Cytoscape uses for wrapped labels at these sizes. */

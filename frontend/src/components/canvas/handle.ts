@@ -1,6 +1,7 @@
 import type { Core } from 'cytoscape';
 import type { MutableRefObject } from 'react';
 import type { ConnectionIndex } from '../../graph/highlight';
+import type { GroupBodyStore } from '../../graph/groupRegions';
 import type { LayoutName } from '../../graph/layouts';
 import type { Settings } from '../../state/settings';
 import type { ViewScaler } from '../../graph/viewScaler';
@@ -28,6 +29,8 @@ export interface CanvasHandle {
   connIndexRef: MutableRefObject<ConnectionIndex>;
   /** A Fit that could not be solved yet (no viewport), held until it can be. */
   pendingFitRef: MutableRefObject<number | null>;
+  /** The one owner of every grouping's drawn body — geometry, titles, bleed. */
+  groupBodies: GroupBodyStore;
   /**
    * The one and only place anything derived from the graph's geometry is
    * recomputed — the scaler's index, the stacking passes, the extent model, the

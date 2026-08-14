@@ -52,6 +52,8 @@ interface Box {
 export interface CoordinateLayoutInput {
   locations: Record<string, Location>;
   connections: Record<string, Connection>;
+  /** Skip the auto-solve and use this many pixels per coordinate step instead. */
+  fixedUnit?: number;
 }
 
 export interface CoordinateLayoutResult {
@@ -267,53 +269,60 @@ export function computeCoordinateLayout(
   }
 
   /* --------------------------------------- one unit shared by both axes ---- */
-  let unit = MIN_UNIT;
-  let maxNeed = 0;
-  cellMap.forEach((c) => {
-    maxNeed = Math.max(maxNeed, c.w + MARGIN_X, c.ht + MARGIN_Y);
-  });
-
-  const window = Math.min(MAX_WINDOW, Math.max(1, Math.ceil(maxNeed / MIN_UNIT)));
-  const cells = [...cellMap.values()];
-
-  for (const a of cells) {
-    for (let dh = -window; dh <= window; dh++) {
-      for (let dv = -window; dv <= window; dv++) {
-        if (dh === 0 && dv === 0) continue;
-        const b = cellMap.get(`${a.h + dh}|${a.v + dv}`);
-        if (!b) continue;
-        if (b.h < a.h || (b.h === a.h && b.v <= a.v)) continue;
-
-        const needH = (a.w + b.w) / 2 + MARGIN_X;
-        const needV = (a.ht + b.ht) / 2 + MARGIN_Y;
-        const reqH = dh === 0 ? Infinity : needH / Math.abs(dh);
-        const reqV = dv === 0 ? Infinity : needV / Math.abs(dv);
-        unit = Math.max(unit, Math.min(reqH, reqV));
-      }
-    }
-  }
-
-  /* ------------------------------- connection names need room on the line */
   const cellOf = new Map<string, Cell>();
   cellMap.forEach((c) => c.offsets.forEach((o) => cellOf.set(o.id, c)));
+  const cells = [...cellMap.values()];
 
-  cy.edges().forEach((e) => {
-    if (e.hasClass('ghost-edge') || e.hasClass('reconnect-edge') || e.hasClass('stub')) return;
-    const labelWidth = (e.data('labelWidth') as number) ?? 0;
-    if (labelWidth <= 0) return;
-    const a = cellOf.get(e.source().id());
-    const b = cellOf.get(e.target().id());
-    if (!a || !b) return;
-    const dist = Math.hypot(b.h - a.h, b.v - a.v);
-    if (dist === 0) return;
-    /* the two boxes eat into the line the name has to sit on, so over-sized
-       rooms need proportionally more grid between them */
-    const clearance =
-      ((size.get(e.source().id())?.w ?? 0) + (size.get(e.target().id())?.w ?? 0)) / 2;
-    unit = Math.max(unit, (labelWidth + EDGE_LABEL_PAD + clearance) / dist);
-  });
+  let unit: number;
+  if (graph.fixedUnit && graph.fixedUnit > 0) {
+    /* the user has pinned a spacing — cells sharing a coordinate still cluster
+       above, but no cell pair may influence this value */
+    unit = graph.fixedUnit;
+  } else {
+    unit = MIN_UNIT;
+    let maxNeed = 0;
+    cellMap.forEach((c) => {
+      maxNeed = Math.max(maxNeed, c.w + MARGIN_X, c.ht + MARGIN_Y);
+    });
 
-  unit = Math.ceil(unit / 2) * 2;
+    const window = Math.min(MAX_WINDOW, Math.max(1, Math.ceil(maxNeed / MIN_UNIT)));
+
+    for (const a of cells) {
+      for (let dh = -window; dh <= window; dh++) {
+        for (let dv = -window; dv <= window; dv++) {
+          if (dh === 0 && dv === 0) continue;
+          const b = cellMap.get(`${a.h + dh}|${a.v + dv}`);
+          if (!b) continue;
+          if (b.h < a.h || (b.h === a.h && b.v <= a.v)) continue;
+
+          const needH = (a.w + b.w) / 2 + MARGIN_X;
+          const needV = (a.ht + b.ht) / 2 + MARGIN_Y;
+          const reqH = dh === 0 ? Infinity : needH / Math.abs(dh);
+          const reqV = dv === 0 ? Infinity : needV / Math.abs(dv);
+          unit = Math.max(unit, Math.min(reqH, reqV));
+        }
+      }
+    }
+
+    /* ----------------------------- connection names need room on the line */
+    cy.edges().forEach((e) => {
+      if (e.hasClass('ghost-edge') || e.hasClass('reconnect-edge') || e.hasClass('stub')) return;
+      const labelWidth = (e.data('labelWidth') as number) ?? 0;
+      if (labelWidth <= 0) return;
+      const a = cellOf.get(e.source().id());
+      const b = cellOf.get(e.target().id());
+      if (!a || !b) return;
+      const dist = Math.hypot(b.h - a.h, b.v - a.v);
+      if (dist === 0) return;
+      /* the two boxes eat into the line the name has to sit on, so over-sized
+         rooms need proportionally more grid between them */
+      const clearance =
+        ((size.get(e.source().id())?.w ?? 0) + (size.get(e.target().id())?.w ?? 0)) / 2;
+      unit = Math.max(unit, (labelWidth + EDGE_LABEL_PAD + clearance) / dist);
+    });
+
+    unit = Math.ceil(unit / 2) * 2;
+  }
 
   /* ----------------------------------------------------- place the lattice */
   const positions = new Map<string, { x: number; y: number }>();

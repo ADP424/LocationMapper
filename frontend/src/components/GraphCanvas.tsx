@@ -1,6 +1,7 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { buildElements, groupNodeId } from '../graph/elements';
 import { useGraphStore } from '../state/store';
+import { pushEscapeHandler } from '../utils/escapeStack';
 import GraphScrollbars from './GraphScrollbars';
 import MenuPanel from './Menu';
 import { useCanvasEvents } from './canvas/useCanvasEvents';
@@ -11,6 +12,8 @@ import { useCytoscape } from './canvas/useCytoscape';
 import { useDragModes } from './canvas/useDragModes';
 import { useEdgeReconnect } from './canvas/useEdgeReconnect';
 import { useElementSync } from './canvas/useElementSync';
+import GroupShapeLayer from './canvas/GroupShapeLayer';
+import { useGroupMemberDrag } from './canvas/useGroupMemberDrag';
 import { useHighlight } from './canvas/useHighlight';
 import { useLayoutRunner } from './canvas/useLayoutRunner';
 import { useMarquee } from './canvas/useMarquee';
@@ -44,13 +47,25 @@ export default function GraphCanvas() {
   const settings = useGraphStore((s) => s.settings);
   const routePlan = useGraphStore((s) => s.trip.plan);
   const waypoints = useGraphStore((s) => s.trip.waypoints);
+  const pick = useGraphStore((s) => s.pick);
+  const cancelPick = useGraphStore((s) => s.cancelPick);
+  const requestPickSearch = useGraphStore((s) => s.requestPickSearch);
 
   const initialElementCount = useRef(
     Object.keys(useGraphStore.getState().locations).length +
       Object.keys(useGraphStore.getState().connections).length
   ).current;
+
   const handle = useCytoscape(containerRef, wrapperRef, initialElementCount);
   useCanvasSettings(handle, settings);
+
+  /* above App's catch-all Escape, below any open menu: Esc disarms the picker
+     without also tearing down the selection the picker was editing */
+  const picking = !!pick;
+  useEffect(() => {
+    if (!picking) return;
+    return pushEscapeHandler(() => useGraphStore.getState().cancelPick());
+  }, [picking]);
 
   const labelNames = useMemo(
     () => ({
@@ -104,6 +119,7 @@ export default function GraphCanvas() {
     return ids;
   }, [selection, multiSelect]);
   useDragModes(handle, settings.groupDrag, settings.locationDrag, pickedForDrag, elements);
+  useGroupMemberDrag(handle);
 
   /** Selecting a label highlights everything carrying it. */
   const labelMembers = useMemo(() => {
@@ -119,7 +135,8 @@ export default function GraphCanvas() {
     }
     return [];
   }, [selection, locations, connections]);
-  useHighlight(handle, elements, selection, multiSelect, labelMembers, routePlan, waypoints);
+
+  useHighlight(handle, elements, selection, multiSelect, labelMembers, routePlan, waypoints, pick);
 
   const menuItems = useMenuEntries();
   const contextMenu = useGraphStore((s) => s.contextMenu);
@@ -128,12 +145,13 @@ export default function GraphCanvas() {
   return (
     <div
       ref={wrapperRef}
-      className={`graph-canvas mode-${mode}`}
+      className={`graph-canvas mode-${mode}${pick ? ' picking' : ''}`}
       onContextMenu={(e) => e.preventDefault()}
     >
+      {/* behind the Cytoscape canvases, by DOM order — see GroupShapeLayer */}
+      <GroupShapeLayer handle={handle} />
       <div ref={containerRef} className="cy-host" />
       {handle && <GraphScrollbars />}
-
       {marquee && (
         <div
           className="marquee"
@@ -145,8 +163,18 @@ export default function GraphCanvas() {
           }}
         />
       )}
-
-      {mode !== 'select' && (
+      {pick && (
+        <div className="canvas-hint picking-hint">
+          <span>{pick.prompt}</span>
+          <button className="hint-btn" onClick={requestPickSearch} title="Go back to the search box">
+            🔍 Search Instead
+          </button>
+          <button className="hint-btn" onClick={cancelPick}>
+            {pick.multi ? 'Done' : 'Cancel'} (Esc)
+          </button>
+        </div>
+      )}
+      {!pick && mode !== 'select' && (
         <div className="canvas-hint">
           {mode === 'add-location'
             ? 'Click Anywhere To Place A New Location (Esc To Cancel)'
@@ -155,13 +183,11 @@ export default function GraphCanvas() {
               : 'Click The Source Location (Esc To Cancel)'}
         </div>
       )}
-
       {multiSelect.length > 1 && (
         <div className="canvas-hint subtle">
           {multiSelect.length} Rooms Selected — Drag Any Of Them To Move Them Together
         </div>
       )}
-
       {contextMenu && (
         <MenuPanel x={contextMenu.x} y={contextMenu.y} items={menuItems} onClose={closeMenu} />
       )}

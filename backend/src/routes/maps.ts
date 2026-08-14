@@ -4,11 +4,13 @@ import { query, withTransaction } from '../db';
 import { ah, badRequest, notFound } from '../http';
 import { mapGroup, mapMap, mapMapSummary } from '../mappers';
 import {
+  assertLocationsOnMap,
   fetchConnectionLabels,
   fetchConnections,
   fetchLocationLabels,
   fetchLocations,
-  replaceRequirements
+  replaceRequirements,
+  replaceRestartTargets
 } from '../repo';
 import { insertRows, insertSql, updateSql } from '../sql';
 import type { GraphPayload } from '../types';
@@ -75,6 +77,7 @@ mapsRouter.get(
     res.json({
       name: graph.map.name,
       description: graph.map.description,
+      startLocationKey: graph.map.startLocationId,
       groups: graph.groups.map((g) => ({
         key: g.id,
         parentKey: g.parentId,
@@ -82,6 +85,8 @@ mapsRouter.get(
         color: g.color,
         textColor: g.textColor,
         notes: g.notes,
+        displayStyle: g.displayStyle,
+        bodyPadding: g.bodyPadding,
         defaultKind: g.defaultKind,
         defaultSize: g.defaultSize,
         defaultColor: g.defaultColor,
@@ -97,8 +102,10 @@ mapsRouter.get(
         defaultSize: l.defaultSize,
         defaultColor: l.defaultColor,
         defaultTextColor: l.defaultTextColor,
-        defaultGroupKey: l.defaultGroupId,
-        overrideGroupings: l.overrideGroupings
+        overrideGroupings: l.overrideGroupings,
+        restartName: l.restartName,
+        restartWeight: l.restartWeight,
+        restartTargetKeys: l.restartTargets
       })),
       connectionLabels: graph.connectionLabels.map((l) => ({
         key: l.id,
@@ -117,7 +124,7 @@ mapsRouter.get(
       })),
       locations: graph.locations.map((l) => ({
         key: l.id,
-        groupKey: l.groupId,
+        groupKeys: l.groupIds,
         name: l.name,
         kind: l.kind,
         size: l.size,
@@ -162,7 +169,18 @@ mapsRouter.patch(
   ah(async (req, res) => {
     const mapId = uuid.parse(req.params.mapId);
     const body = mapUpdate.parse(req.body);
-    const stmt = updateSql('maps', mapId, { name: body.name, description: body.description }, '*');
+    /* null clears it; a non-null value must be a room on this very map */
+    if (body.startLocationId) await assertLocationsOnMap(mapId, [body.startLocationId]);
+    const stmt = updateSql(
+      'maps',
+      mapId,
+      {
+        name: body.name,
+        description: body.description,
+        start_location_id: body.startLocationId
+      },
+      '*'
+    );
     const { rows } = stmt
       ? await query(stmt.text, stmt.values)
       : await query(`SELECT * FROM maps WHERE id = $1`, [mapId]);
@@ -259,6 +277,8 @@ mapsRouter.post(
             color: g.color,
             text_color: g.textColor,
             notes: g.notes,
+            display_style: g.displayStyle,
+            body_padding: g.bodyPadding,
             default_kind: g.defaultKind,
             default_size: g.defaultSize,
             default_color: g.defaultColor,
@@ -281,22 +301,26 @@ mapsRouter.post(
       }
 
       const locLabelIds = new Map<string, string>();
+      /** Restart targets reference location keys, resolved once locations exist below. */
+      const pendingLabelRestarts: Array<{ labelId: string; keys: string[] }> = [];
       for (const l of body.locationLabels ?? []) {
-        locLabelIds.set(
-          l.key,
-          await insert('location_labels', {
-            map_id: mapId,
-            name: l.name,
-            color: l.color,
-            notes: l.notes,
-            default_kind: l.defaultKind,
-            default_size: l.defaultSize,
-            default_color: l.defaultColor,
-            default_text_color: l.defaultTextColor,
-            default_group_id: l.defaultGroupKey ? groupIds.get(l.defaultGroupKey) ?? null : null,
-            override_groupings: l.overrideGroupings
-          })
-        );
+        const id = await insert('location_labels', {
+          map_id: mapId,
+          name: l.name,
+          color: l.color,
+          notes: l.notes,
+          default_kind: l.defaultKind,
+          default_size: l.defaultSize,
+          default_color: l.defaultColor,
+          default_text_color: l.defaultTextColor,
+          override_groupings: l.overrideGroupings,
+          restart_name: l.restartName,
+          restart_weight: l.restartWeight
+        });
+        locLabelIds.set(l.key, id);
+        if (l.restartTargetKeys?.length) {
+          pendingLabelRestarts.push({ labelId: id, keys: l.restartTargetKeys });
+        }
       }
 
       const connLabelIds = new Map<string, string>();
@@ -330,13 +354,17 @@ mapsRouter.post(
       const locationIds = new Map<string, string>();
       const locationRows: unknown[][] = [];
       const locLabelAssignments: unknown[][] = [];
+      /* membership order matters — [0] becomes the layout anchor — so these are
+         inserted as individual statements (picking up the shared `seq` sequence
+         in call order) rather than one batched INSERT, whose row order Postgres
+         does not guarantee back into `added_at`/`seq` ties */
+      const groupAssignments: Array<{ locationId: string; groupId: string }> = [];
       for (const loc of body.locations) {
         const id = randomUUID();
         locationIds.set(loc.key, id);
         locationRows.push([
           id,
           mapId,
-          loc.groupKey ? groupIds.get(loc.groupKey) ?? null : null,
           loc.name,
           loc.kind,
           loc.size,
@@ -350,6 +378,18 @@ mapsRouter.post(
           loc.coordY,
           loc.coordZ
         ]);
+        const keys = loc.groupKeys ?? (loc.groupKey ? [loc.groupKey] : []);
+        const seen = new Set<string>();
+        for (const key of keys) {
+          const gid = groupIds.get(key);
+          if (!gid) {
+            warn('grouping', key);
+            continue;
+          }
+          if (seen.has(gid)) continue;
+          seen.add(gid);
+          groupAssignments.push({ locationId: id, groupId: gid });
+        }
         for (const key of loc.labelKeys ?? []) {
           const labelId = locLabelIds.get(key);
           if (!labelId) {
@@ -365,7 +405,6 @@ mapsRouter.post(
         [
           'id',
           'map_id',
-          'group_id',
           'name',
           'kind',
           'size',
@@ -381,6 +420,13 @@ mapsRouter.post(
         ],
         locationRows
       );
+      for (const a of groupAssignments) {
+        await client.query(
+          `INSERT INTO location_group_assignments (location_id, group_id) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [a.locationId, a.groupId]
+        );
+      }
       await insertRows(
         client,
         'location_label_assignments',
@@ -402,6 +448,20 @@ mapsRouter.post(
       for (const { labelId, keys } of pendingLabelRequires) {
         const ids = resolveLocations(keys, 'label unlock condition');
         if (ids.length) await replaceRequirements(client, 'label', labelId, ids);
+      }
+
+      for (const { labelId, keys } of pendingLabelRestarts) {
+        const ids = resolveLocations(keys, 'restart target');
+        if (ids.length) await replaceRestartTargets(client, labelId, ids);
+      }
+
+      if (body.startLocationKey) {
+        const startId = locationIds.get(body.startLocationKey);
+        if (startId) {
+          await client.query(`UPDATE maps SET start_location_id = $2 WHERE id = $1`, [mapId, startId]);
+        } else {
+          warn('default trip start', body.startLocationKey);
+        }
       }
 
       const connectionRows: unknown[][] = [];

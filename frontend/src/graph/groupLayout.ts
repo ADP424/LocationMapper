@@ -1,9 +1,11 @@
 import cytoscape, { Core, ElementDefinition } from 'cytoscape';
 import { LayoutName, computeMetrics, layoutOptions } from './layouts';
+import { DEFAULT_GROUP_PADDING } from './model';
 import { layoutSpan } from './viewScale';
 
-/* the drawn grouping padding is fixed model geometry — it never scales */
-const GROUP_PADDING = 34;
+/** A little air on top of whatever the grouping actually draws, so two
+ *  neighbouring boxes never touch. Model geometry — it never scales. */
+const PADDING_SLACK = 4;
 /** Extra headroom inside a grouping for its title; this *does* scale with Base Size. */
 const LABEL_ROOM = 20;
 
@@ -125,8 +127,13 @@ export async function computeGroupedLayout(
   name: LayoutName,
   baseScale = 1
 ): Promise<Map<string, Pos>> {
-  const padding = GROUP_PADDING;
   const labelRoom = LABEL_ROOM * baseScale;
+  /** Each grouping reserves exactly the room its own body will occupy. */
+  const paddingOf = (level: string | null) => {
+    if (!level) return DEFAULT_GROUP_PADDING + PADDING_SLACK;
+    const p = cy.getElementById(level).data('bodyPadding') as number;
+    return (Number.isFinite(p) && p >= 0 ? p : DEFAULT_GROUP_PADDING) + PADDING_SLACK;
+  };
 
   const realNodes = cy
     .nodes()
@@ -159,7 +166,14 @@ export async function computeGroupedLayout(
     list.push(id);
     map.set(key, list);
   };
-  groupNodes.forEach((g) => push(childGroups, parentOfGroup.get(g.id()) ?? null, g.id()));
+  /* a grouping that anchors nobody (every membership is someone else's
+     anchor) is a childless compound node — GroupBodyStore positions and sizes
+     it directly from its drawn region, so it takes no container slot here and
+     reserves no phantom hole in its nesting parent's layout */
+  groupNodes.forEach((g) => {
+    if (g.isChildless()) return;
+    push(childGroups, parentOfGroup.get(g.id()) ?? null, g.id());
+  });
   realNodes.forEach((n) => {
     const p = n.parent();
     push(childNodes, p.nonempty() ? p.first().id() : null, n.id());
@@ -192,10 +206,34 @@ export async function computeGroupedLayout(
     return idx === 0 ? nodeId : chain[idx - 1];
   };
 
+  /* ---- cohesion ------------------------------------------------------ */
+  /* A membership that doesn't anchor a room still pulls it: each grouping adds
+     hub-and-spoke virtual edges over its members, which merge into the
+     quotient graphs exactly like real connections. A room in two groupings is
+     pulled toward both — membership behaves like membership, even where it
+     isn't containment. */
+  const cohesion: Array<[string, string]> = [];
+  {
+    const byGroup = new Map<string, string[]>();
+    realNodes.forEach((n) => {
+      const raw = (n.data('memberOf') as string) || '';
+      if (!raw) return;
+      for (const gid of raw.split(',')) {
+        const list = byGroup.get(gid) ?? [];
+        list.push(n.id());
+        byGroup.set(gid, list);
+      }
+    });
+    byGroup.forEach((ids) => {
+      for (let i = 1; i < ids.length; i++) cohesion.push([ids[0], ids[i]]);
+    });
+  }
+
   /* ---- recursive layout --------------------------------------------- */
   const results = new Map<string, ContainerResult>();
 
   const layoutContainer = async (level: string | null): Promise<void> => {
+    const padding = paddingOf(level);
     const groups = childGroups.get(level) ?? [];
     const nodes = childNodes.get(level) ?? [];
     for (const gid of groups) await layoutContainer(gid);
@@ -224,6 +262,19 @@ export async function computeGroupedLayout(
       const key = `${su} ${tu}`;
       merged.set(key, Math.max(merged.get(key) ?? 0, (e.data('labelWidth') as number) ?? 0));
     });
+    /* members of one grouping anchored in the same container collapse to
+       su === tu (a no-op, containment already did that job); members
+       scattered across containers pull those containers together, at every
+       nesting level, through the same quotient-edge machinery as real edges */
+    for (const [s, t] of cohesion) {
+      if (!size.has(s) || !size.has(t)) continue;
+      if (!inside(s, level) || !inside(t, level)) continue;
+      const su = unitAt(s, level);
+      const tu = unitAt(t, level);
+      if (!su || !tu || su === tu) continue;
+      const key = `${su} ${tu}`;
+      if (!merged.has(key)) merged.set(key, 0);
+    }
 
     let i = 0;
     merged.forEach((labelWidth, key) => {

@@ -4,13 +4,28 @@ import { isInternalId } from './elements';
 const IMMUTABLE = new Set(['id', 'source', 'target', 'parent']);
 /** Owned by runtime passes (stacking, view scale) — a reconcile must not reset
  *  them: `tView`/`minFontView`/`skel`/`lineView`/`edgeHidden` are the
- *  ViewScaler's own write set, `boxW`/`boxH` are the layering pass's measured
- *  group box, and `zLayer`/`groupFillOpacity`/`groupBorderOpacity` are the
- *  stacking pass's. */
+ *  ViewScaler's own write set, `boxW`/`boxH`/`titleScale`/`titleW`/`titleH` are
+ *  the layering pass's measured group box and area-derived title size, and
+ *  `zLayer`/`groupFillOpacity`/`groupBorderOpacity` are the stacking pass's. */
 const RUNTIME = new Set([
   'zLayer',
   'groupFillOpacity',
   'groupBorderOpacity',
+  /* written by GroupShapeLayer's hit test, on pointer move — a reconcile that
+     reset it would make the grouping clickable again until the next move */
+  'bodyHit',
+  /* written by GroupBodyStore.sync() — the title's anchor on the body's
+     top-most edge, and (for a childless/anchorless grouping) the leaf node's
+     own position and size */
+  'titleDx',
+  'titleDy',
+  'leafW',
+  'leafH',
+  /* the area-derived title size: `titleW0`/`titleH0` are the build-time raw
+     metrics a rename updates; these three are the layering pass's */
+  'titleScale',
+  'titleW',
+  'titleH',
   'boxW',
   'boxH',
   'tView',
@@ -129,6 +144,8 @@ export function reconcile(
         if (
           'w' in next ||
           'h' in next ||
+          /* the compound box grew or shrank: every bound is a function of it */
+          'bodyPadding' in next ||
           'lw' in next ||
           'lh' in next ||
           'spanW' in next ||

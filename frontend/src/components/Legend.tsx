@@ -1,4 +1,5 @@
 import { useGraphStore } from '../state/store';
+import { Help } from './fields';
 
 const GROUPING_HINT = {
   always: 'Grouping (Drag To Move Everything Inside)',
@@ -20,6 +21,10 @@ export default function Legend() {
         <li><span className="swatch edge" /> Connection (Thickness = Weight)</li>
         <li><span className="swatch edge dashed" /> Ephemeral Or Locked (Default Style Only)</li>
         <li>🔒 Locked Connection · 📝 Has Notes</li>
+        <li>
+          ★ Default Trip Start · ↻ Restart
+          <Help text="A restart is a one-way move granted by a location label: every room carrying it may jump to the label's targets. It is never drawn, but the trip planner marks every one it takes, and a trip can turn them off." />
+        </li>
       </ul>
       <p className="muted small">
         Colors And Line Styles Are Yours To Choose — Nothing Is Overridden. "Default"

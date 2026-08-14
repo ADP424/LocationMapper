@@ -81,9 +81,11 @@ export function useLayoutRunner(handle: CanvasHandle | null, layout: LayoutName,
     if (isCoordinateLayout(layout)) {
       const plane = COORDINATE_LAYOUTS[layout];
       const state = useGraphStore.getState();
+      const { autoCoordinateUnit, coordinateUnit } = settingsRef.current;
       const result = computeCoordinateLayout(cy, plane, {
         locations: state.locations,
-        connections: state.connections
+        connections: state.connections,
+        fixedUnit: autoCoordinateUnit ? undefined : coordinateUnit
       });
       if (!result.positions.size) return;
 
@@ -95,6 +97,12 @@ export function useLayoutRunner(handle: CanvasHandle | null, layout: LayoutName,
       });
       rebaseStubOffsets(cy);
       finish(70); // off-plane coordinate order (restack reads layeringSourceRef)
+
+      /* the field shows what the last re-layout actually used, so keep it
+         live while automatic — the user's own pinned value must not drift */
+      if (autoCoordinateUnit && result.unit !== coordinateUnit) {
+        useGraphStore.getState().setSettings({ coordinateUnit: result.unit });
+      }
 
       useGraphStore
         .getState()

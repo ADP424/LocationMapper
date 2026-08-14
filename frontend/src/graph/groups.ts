@@ -1,4 +1,4 @@
-import type { Group } from '../types';
+import type { Group, Location } from '../types';
 
 export interface GroupTreeNode {
   group: Group;
@@ -85,6 +85,25 @@ export function groupPathLabel(groups: Record<string, Group>, id: string): strin
 /** Does this grouping claim any room styling at all? */
 export function hasGroupDefaults(g: Group): boolean {
   return !!(g.defaultKind || g.defaultColor || g.defaultTextColor) || g.defaultSize !== null;
+}
+
+/** The layout anchor: the oldest membership — the grouping whose compound box
+ *  actually contains this room. Every other membership merely draws a body
+ *  around it. */
+export const anchorGroupId = (l: Pick<Location, 'groupIds'>): string | null =>
+  l.groupIds[0] ?? null;
+
+/** group id -> member location ids, membership order preserved. */
+export function membersByGroup(locations: Iterable<Location>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const l of locations) {
+    for (const gid of l.groupIds) {
+      const list = out.get(gid);
+      if (list) list.push(l.id);
+      else out.set(gid, [l.id]);
+    }
+  }
+  return out;
 }
 
 /** Groups that should be drawn: those with rooms, plus all of their ancestors. */

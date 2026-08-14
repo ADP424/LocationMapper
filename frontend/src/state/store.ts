@@ -14,6 +14,7 @@ import {
   type RoutePlan
 } from '../graph/pathfinding';
 import { runPlanner, type PlannerRun } from '../graph/plannerClient';
+import { buildRestartLinks } from '../graph/restarts';
 import { DEFAULT_SETTINGS, loadSettings, normaliseSettings, saveSettings, type Settings } from './settings';
 import type {
   Connection,
@@ -30,6 +31,45 @@ import type {
 
 export type Mode = 'select' | 'add-location' | 'connect';
 
+export type PickKind = 'location' | 'connection' | 'group';
+
+export const PICK_KIND_LABEL: Record<PickKind, string> = {
+  location: 'Location',
+  connection: 'Connection',
+  group: 'Grouping'
+};
+
+/**
+ * A live "click it on the map" request. Exactly one can be armed at a time; the
+ * `token` identifies its owner, so a picker that unmounts can only ever cancel
+ * *its own* request, never a newer one that replaced it.
+ */
+export interface PickState {
+  token: number;
+  kind: PickKind;
+  /** Shown in the canvas banner and in the right-click menu. */
+  prompt: string;
+  /** Ids that may be chosen; null = anything of that kind. */
+  candidates: Set<string> | null;
+  /** Ids already taken — refused, and drawn as "already chosen". */
+  chosen: Set<string>;
+  /** Stay armed after a pick, so several can be taken in a row. */
+  multi: boolean;
+  /** The same element may be taken twice (a trip may revisit a room). */
+  allowDuplicates: boolean;
+  onPick: (id: string) => void;
+}
+
+export interface PickRequest {
+  kind: PickKind;
+  prompt: string;
+  candidates?: Set<string> | null;
+  chosen?: Iterable<string>;
+  multi?: boolean;
+  allowDuplicates?: boolean;
+  onPick: (id: string) => void;
+}
+
 interface ConnectionDefaults {
   direction: Direction;
   ephemeral: boolean;
@@ -40,6 +80,8 @@ export interface TripState {
   waypoints: string[];
   mode: RouteMode;
   axes: AxisToggles;
+  /** Let the planner use label-granted restart moves. */
+  allowRestarts: boolean;
   /** Re-solve automatically when the trip or the map changes. */
   autoPlan: boolean;
   plan: RoutePlan | null;
@@ -53,6 +95,7 @@ const EMPTY_TRIP: TripState = {
   waypoints: [],
   mode: 'stops',
   axes: { x: true, y: true, z: true },
+  allowRestarts: true,
   autoPlan: true,
   plan: null,
   stale: false,
@@ -81,6 +124,10 @@ interface Store {
   mode: Mode;
   pendingSource: string | null;
   contextMenu: ContextMenuState | null;
+  /** The armed "pick it on the canvas" request, if any. */
+  pick: PickState | null;
+  /** Token of the picker that asked to go back to its search box. */
+  pickSearch: number | null;
   layout: LayoutName;
   layoutNonce: number;
   labelMode: LabelMode;
@@ -103,6 +150,8 @@ interface Store {
   deleteMap: (id: string) => Promise<void>;
   importMapFile: (file: File) => Promise<void>;
   exportCurrentMap: () => Promise<void>;
+  /** The stop every new trip is seeded with. null clears it. */
+  setMapStart: (locationId: string | null) => Promise<void>;
 
   select: (sel: Selection | null) => void;
   selectLocation: (id: string) => void;
@@ -125,12 +174,18 @@ interface Store {
   closeSettings: () => void;
   openContextMenu: (menu: ContextMenuState) => void;
   closeContextMenu: () => void;
+  beginPick: (req: PickRequest) => number;
+  cancelPick: () => void;
+  resolvePick: (kind: PickKind, id: string) => void;
+  requestPickSearch: () => void;
+  clearPickSearch: () => void;
 
   addWaypoint: (locationId: string) => void;
   removeWaypoint: (index: number) => void;
   moveWaypoint: (index: number, delta: number) => void;
   setTripMode: (mode: RouteMode) => void;
   setTripAxis: (axis: keyof AxisToggles, on: boolean) => void;
+  setAllowRestarts: (on: boolean) => void;
   setAutoPlan: (on: boolean) => void;
   startPlan: () => Promise<void>;
   cancelPlan: () => void;
@@ -138,7 +193,7 @@ interface Store {
   clearTrip: () => void;
   resetAllVisited: () => Promise<void>;
 
-  createLocationAt: (x: number, y: number, groupId?: string | null) => Promise<void>;
+  createLocationAt: (x: number, y: number, groupIds?: string[]) => Promise<void>;
   updateLocation: (id: string, patch: Partial<Location>) => Promise<void>;
   bulkUpdateLocations: (ids: string[], patch: Partial<Location>) => Promise<void>;
   deleteLocation: (id: string) => Promise<void>;
@@ -150,10 +205,12 @@ interface Store {
   updateGroup: (id: string, patch: Partial<Group>) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
   ungroupAll: (id: string) => Promise<void>;
-  setLocationGroup: (locationId: string, groupId: string | null) => Promise<void>;
+  addLocationGroup: (locationId: string, groupId: string) => Promise<void>;
+  removeLocationGroup: (locationId: string, groupId: string) => Promise<void>;
+  bulkAssignLocationGroup: (locationIds: string[], groupId: string) => Promise<void>;
   setGroupParent: (groupId: string, parentId: string | null) => Promise<void>;
   applyGroupStylingToAll: (groupId: string) => Promise<void>;
-  applyGroupStyling: (locationId: string) => Promise<void>;
+  applyGroupStyling: (locationId: string, groupId: string) => Promise<void>;
 
   createLocationLabel: (name: string) => Promise<void>;
   updateLocationLabel: (id: string, patch: Partial<LocationLabel>) => Promise<void>;
@@ -223,6 +280,9 @@ let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let tripTimer: ReturnType<typeof setTimeout> | null = null;
 const TRIP_DEBOUNCE_MS = 250;
 
+/** Monotonic, so a stale token can never collide with a live request. */
+let pickToken = 0;
+
 export const useGraphStore = create<Store>()((set, get) => {
   const flash = (msg: string) => {
     set({ status: msg });
@@ -278,6 +338,10 @@ export const useGraphStore = create<Store>()((set, get) => {
     else set((s) => ({ layoutNonce: s.layoutNonce + 1 }));
   };
 
+  /** A new trip is seeded with the map's default start, if it has one. */
+  const seedWaypoints = (startLocationId: string | null | undefined) =>
+    startLocationId ? [startLocationId] : [];
+
   return {
     maps: [],
     map: null,
@@ -294,6 +358,8 @@ export const useGraphStore = create<Store>()((set, get) => {
     mode: 'select',
     pendingSource: null,
     contextMenu: null,
+    pick: null,
+    pickSearch: null,
     layout: 'elk-layered',
     layoutNonce: 0,
     labelMode: 'names',
@@ -341,12 +407,21 @@ export const useGraphStore = create<Store>()((set, get) => {
           multiSelect: [],
           pendingSource: null,
           contextMenu: null,
+          pick: null,
+          pickSearch: null,
           mode: 'select',
           pendingPositions: {},
           pendingPortalOffsets: {},
           layout: allPositioned ? 'preset' : s.layout,
           layoutNonce: s.layoutNonce + 1,
-          trip: { ...EMPTY_TRIP, mode: s.trip.mode, axes: s.trip.axes, autoPlan: s.trip.autoPlan }
+          trip: {
+            ...EMPTY_TRIP,
+            mode: s.trip.mode,
+            axes: s.trip.axes,
+            autoPlan: s.trip.autoPlan,
+            allowRestarts: s.trip.allowRestarts,
+            waypoints: seedWaypoints(graph.map.startLocationId)
+          }
         }));
       });
     },
@@ -375,6 +450,8 @@ export const useGraphStore = create<Store>()((set, get) => {
           connections: {},
           selection: null,
           multiSelect: [],
+          pick: null,
+          pickSearch: null,
           pendingPositions: {},
           pendingPortalOffsets: {},
           trip: { ...EMPTY_TRIP }
@@ -413,6 +490,24 @@ export const useGraphStore = create<Store>()((set, get) => {
       });
     },
 
+    setMapStart: async (locationId) => {
+      const { mapId } = get();
+      if (!mapId) return;
+      const updated = await guardScoped(() => api.updateMap(mapId, { startLocationId: locationId }));
+      if (!updated) return;
+      set((s) => ({
+        map: updated,
+        maps: s.maps.map((m) =>
+          m.id === updated.id ? { ...m, startLocationId: updated.startLocationId } : m
+        ),
+        contextMenu: null
+      }));
+      /* an empty trip *is* a new trip, so the setting shows its effect at once.
+         A trip already under way is never rewritten underneath the user. */
+      if (locationId && get().trip.waypoints.length === 0) get().addWaypoint(locationId);
+      flash(locationId ? 'Default Trip Start Set' : 'Default Trip Start Cleared');
+    },
+
     select: (sel) => set({ selection: sel, multiSelect: [] }),
     selectLocation: (id) => set({ selection: { type: 'location', id }, multiSelect: [] }),
     selectConnection: (id) => set({ selection: { type: 'connection', id }, multiSelect: [] }),
@@ -427,8 +522,9 @@ export const useGraphStore = create<Store>()((set, get) => {
       else set({ multiSelect: ids, selection: null, contextMenu: null });
     },
 
+    /* a mode and a pick both want the next click — never let both be armed */
     setMode: (mode) =>
-      set({ mode, pendingSource: mode === 'connect' ? get().pendingSource : null }),
+      set({ mode, pendingSource: mode === 'connect' ? get().pendingSource : null, pick: null }),
     setLayout: (layout) => set({ layout }),
     runLayout: () => set((s) => ({ layoutNonce: s.layoutNonce + 1 })),
     setLabelMode: (labelMode) => set({ labelMode }),
@@ -470,6 +566,70 @@ export const useGraphStore = create<Store>()((set, get) => {
     openContextMenu: (contextMenu) => set({ contextMenu }),
     closeContextMenu: () => set({ contextMenu: null }),
 
+    /* ------------------------------------------------- pick from canvas */
+    beginPick: (req) => {
+      const token = ++pickToken;
+      set({
+        pick: {
+          token,
+          kind: req.kind,
+          prompt: req.prompt,
+          candidates: req.candidates ?? null,
+          chosen: new Set(req.chosen ?? []),
+          multi: !!req.multi,
+          allowDuplicates: !!req.allowDuplicates,
+          onPick: req.onPick
+        },
+        pickSearch: null,
+        contextMenu: null,
+        /* picking borrows the pointer: a half-started connection would eat the click */
+        mode: 'select',
+        pendingSource: null
+      });
+      return token;
+    },
+    cancelPick: () => {
+      if (get().pick) set({ pick: null });
+    },
+    /**
+     * The canvas says what it was handed; the request says what it wanted. A
+     * mismatch is a teaching moment, not an error — the pick stays armed.
+     */
+    resolvePick: (kind, id) => {
+      const pick = get().pick;
+      if (!pick) return;
+      if (kind !== pick.kind) {
+        flash(`Pick A ${PICK_KIND_LABEL[pick.kind]} — That Is A ${PICK_KIND_LABEL[kind]}`);
+        return;
+      }
+      if (pick.candidates && !pick.candidates.has(id)) {
+        flash('Not A Valid Choice Here');
+        return;
+      }
+      if (!pick.allowDuplicates && pick.chosen.has(id)) {
+        flash('Already Chosen');
+        return;
+      }
+      pick.onPick(id);
+      if (!pick.multi) {
+        set({ pick: null });
+        return;
+      }
+      if (pick.allowDuplicates) return;
+      const chosen = new Set(pick.chosen);
+      chosen.add(id);
+      set({ pick: { ...pick, chosen } });
+    },
+    /** Hand the pointer back: the owner re-opens its search popover. */
+    requestPickSearch: () => {
+      const pick = get().pick;
+      if (!pick) return;
+      set({ pick: null, pickSearch: pick.token });
+    },
+    clearPickSearch: () => {
+      if (get().pickSearch !== null) set({ pickSearch: null });
+    },
+
     /* ------------------------------------------------------ trip planner */
     addWaypoint: (locationId) => {
       set((s) => ({ trip: { ...s.trip, waypoints: [...s.trip.waypoints, locationId] } }));
@@ -495,6 +655,10 @@ export const useGraphStore = create<Store>()((set, get) => {
       set((s) => ({ trip: { ...s.trip, axes: { ...s.trip.axes, [axis]: on } } }));
       get().markTripStale();
     },
+    setAllowRestarts: (allowRestarts) => {
+      set((s) => ({ trip: { ...s.trip, allowRestarts } }));
+      get().markTripStale();
+    },
     setAutoPlan: (autoPlan) => {
       set((s) => ({ trip: { ...s.trip, autoPlan } }));
       if (autoPlan && get().trip.stale) void get().startPlan();
@@ -515,13 +679,16 @@ export const useGraphStore = create<Store>()((set, get) => {
 
     startPlan: async () => {
       cancelTripDebounce();
-      const { trip, locations, connections, settings } = get();
+      const { trip, locations, connections, locationLabels, settings } = get();
       if (trip.waypoints.length < 2) {
         set((s) => ({ trip: { ...s.trip, running: false, progress: null, stale: false } }));
         return;
       }
 
       plannerRun?.discard();
+
+      /* restarts exist only here: they are never rows, never elements, never drawn */
+      const restarts = trip.allowRestarts ? buildRestartLinks(locations, locationLabels) : [];
 
       const input: PlannerInput = {
         locations: Object.values(locations).map((l) => ({
@@ -531,16 +698,31 @@ export const useGraphStore = create<Store>()((set, get) => {
           coordY: l.coordY,
           coordZ: l.coordZ
         })),
-        connections: Object.values(connections).map((c) => ({
-          id: c.id,
-          sourceId: c.sourceId,
-          targetId: c.targetId,
-          arrowSource: c.arrowSource,
-          arrowTarget: c.arrowTarget,
-          weight: c.weight,
-          locked: c.locked,
-          requires: c.requires
-        })),
+        connections: [
+          ...Object.values(connections).map((c) => ({
+            id: c.id,
+            sourceId: c.sourceId,
+            targetId: c.targetId,
+            arrowSource: c.arrowSource,
+            arrowTarget: c.arrowTarget,
+            weight: c.weight,
+            locked: c.locked,
+            requires: c.requires
+          })),
+          ...restarts.map((r) => ({
+            id: r.id,
+            sourceId: r.fromId,
+            targetId: r.toId,
+            /* one-way, so the user's carefully one-way map stays one-way */
+            arrowSource: false,
+            arrowTarget: true,
+            weight: r.weight,
+            locked: false,
+            requires: [],
+            restart: true,
+            restartLabelId: r.labelId
+          }))
+        ],
         waypoints: trip.waypoints,
         options: { mode: trip.mode, axes: trip.axes },
         budget: {
@@ -590,7 +772,15 @@ export const useGraphStore = create<Store>()((set, get) => {
       plannerRun?.discard();
       plannerRun = null;
       set((s) => ({
-        trip: { ...EMPTY_TRIP, mode: s.trip.mode, axes: s.trip.axes, autoPlan: s.trip.autoPlan }
+        trip: {
+          ...EMPTY_TRIP,
+          mode: s.trip.mode,
+          axes: s.trip.axes,
+          autoPlan: s.trip.autoPlan,
+          allowRestarts: s.trip.allowRestarts,
+          /* "Clear" means "start over", and starting over starts at home */
+          waypoints: seedWaypoints(s.map?.startLocationId)
+        }
       }));
     },
 
@@ -611,11 +801,11 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     /* ------------------------------------------------------- locations */
-    createLocationAt: async (x, y, groupId) => {
+    createLocationAt: async (x, y, groupIds) => {
       const { mapId } = get();
       if (!mapId) return;
       const created = await guardScoped(() =>
-        api.createLocation(mapId, { name: 'New Location', x, y, groupId: groupId ?? null })
+        api.createLocation(mapId, { name: 'New Location', x, y, groupIds: groupIds ?? [] })
       );
       if (!created) return;
       set((s) => ({
@@ -626,7 +816,7 @@ export const useGraphStore = create<Store>()((set, get) => {
         contextMenu: null
       }));
       flash('Location Created — Rename It In The Inspector');
-      if (groupId) afterStructureChange();
+      if (groupIds?.length) afterStructureChange();
     },
 
     updateLocation: async (id, patch) => {
@@ -666,7 +856,6 @@ export const useGraphStore = create<Store>()((set, get) => {
         });
       } else flash(`Updated ${total} Locations`);
 
-      if ('groupId' in patch) afterStructureChange();
       if ('visited' in patch) get().markTripStale();
     },
 
@@ -701,9 +890,39 @@ export const useGraphStore = create<Store>()((set, get) => {
               ? { ...c, requires: c.requires.filter((r) => !gone.has(r)) }
               : c;
           }
+          /* location_label_restarts and connection_label_requirements both
+             cascade server-side, and maps.start_location_id is SET NULL. The
+             client has to mirror all three, or it keeps offering a restart to a
+             room that no longer exists — and the planner would build an arc to it. */
+          const locationLabels = { ...s.locationLabels };
+          for (const [key, l] of Object.entries(locationLabels)) {
+            if (l.restartTargets.some((t) => gone.has(t))) {
+              locationLabels[key] = {
+                ...l,
+                restartTargets: l.restartTargets.filter((t) => !gone.has(t))
+              };
+            }
+          }
+          const connectionLabels = { ...s.connectionLabels };
+          for (const [key, l] of Object.entries(connectionLabels)) {
+            if (l.defaultRequires.some((r) => gone.has(r))) {
+              connectionLabels[key] = {
+                ...l,
+                defaultRequires: l.defaultRequires.filter((r) => !gone.has(r))
+              };
+            }
+          }
+          const map =
+            s.map && s.map.startLocationId && gone.has(s.map.startLocationId)
+              ? { ...s.map, startLocationId: null }
+              : s.map;
+
           return {
+            map,
             locations,
             connections,
+            locationLabels,
+            connectionLabels,
             selection: null,
             multiSelect: [],
             contextMenu: null,
@@ -747,7 +966,9 @@ export const useGraphStore = create<Store>()((set, get) => {
       set((s) => {
         const locations = { ...s.locations };
         for (const id of locationIds) {
-          if (locations[id]) locations[id] = { ...locations[id], groupId: created.id };
+          if (locations[id] && !locations[id].groupIds.includes(created.id)) {
+            locations[id] = { ...locations[id], groupIds: [...locations[id].groupIds, created.id] };
+          }
         }
         return {
           groups: { ...s.groups, [created.id]: created },
@@ -780,7 +1001,9 @@ export const useGraphStore = create<Store>()((set, get) => {
         }
         const locations = { ...s.locations };
         for (const [key, l] of Object.entries(locations)) {
-          if (l.groupId === id) locations[key] = { ...l, groupId: null };
+          if (l.groupIds.includes(id)) {
+            locations[key] = { ...l, groupIds: l.groupIds.filter((g) => g !== id) };
+          }
         }
         return { groups, locations, selection: null, contextMenu: null };
       });
@@ -794,7 +1017,9 @@ export const useGraphStore = create<Store>()((set, get) => {
       set((s) => {
         const locations = { ...s.locations };
         for (const [key, l] of Object.entries(locations)) {
-          if (l.groupId === id) locations[key] = { ...l, groupId: null };
+          if (l.groupIds.includes(id)) {
+            locations[key] = { ...l, groupIds: l.groupIds.filter((g) => g !== id) };
+          }
         }
         return { locations, contextMenu: null };
       });
@@ -802,10 +1027,38 @@ export const useGraphStore = create<Store>()((set, get) => {
       afterStructureChange();
     },
 
-    setLocationGroup: async (locationId, groupId) => {
-      const updated = await guardScoped(() => api.updateLocation(locationId, { groupId }));
+    addLocationGroup: async (locationId, groupId) => {
+      const updated = await guardScoped(() => api.assignLocationGroup(locationId, groupId));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [locationId]: updated }, contextMenu: null }));
+      afterStructureChange();
+    },
+
+    removeLocationGroup: async (locationId, groupId) => {
+      const updated = await guardScoped(() => api.unassignLocationGroup(locationId, groupId));
+      if (!updated) return;
+      set((s) => ({ locations: { ...s.locations, [locationId]: updated }, contextMenu: null }));
+      afterStructureChange();
+    },
+
+    bulkAssignLocationGroup: async (locationIds, groupId) => {
+      if (!locationIds.length) return;
+      const mapAtStart = get().mapId;
+      set({ busy: true, error: null });
+      const { ok, failed, total } = await settleBatch(
+        locationIds.map((id) => api.assignLocationGroup(id, groupId))
+      );
+      set({ busy: false });
+      if (get().mapId !== mapAtStart) return;
+      if (ok.length) {
+        set((s) => {
+          const locations = { ...s.locations };
+          for (const loc of ok) locations[loc.id] = loc;
+          return { locations };
+        });
+      }
+      if (failed) set({ error: `Grouping applied to ${ok.length} of ${total} rooms — ${failed} failed` });
+      else flash(`Grouping Applied To ${total} Rooms`);
       afterStructureChange();
     },
 
@@ -835,8 +1088,8 @@ export const useGraphStore = create<Store>()((set, get) => {
       afterStructureChange();
     },
 
-    applyGroupStyling: async (locationId) => {
-      const updated = await guardScoped(() => api.applyGroupStyling(locationId));
+    applyGroupStyling: async (locationId, groupId) => {
+      const updated = await guardScoped(() => api.applyGroupStyling(locationId, groupId));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [locationId]: updated } }));
       flash('Grouping Styling Applied');
@@ -862,6 +1115,8 @@ export const useGraphStore = create<Store>()((set, get) => {
       const updated = await guardScoped(() => api.updateLocationLabel(id, patch));
       if (!updated) return;
       set((s) => ({ locationLabels: { ...s.locationLabels, [id]: updated } }));
+      /* restartName is cosmetic; the other two change the graph the planner walks */
+      if ('restartTargets' in patch || 'restartWeight' in patch) get().markTripStale();
     },
 
     deleteLocationLabel: async (id) => {
@@ -879,6 +1134,7 @@ export const useGraphStore = create<Store>()((set, get) => {
         return { locationLabels, locations, selection: null };
       });
       flash('Label Deleted (Styling Kept)');
+      get().markTripStale(); // it may have been granting restarts
     },
 
     applyLocationLabelToAll: async (id) => {
@@ -894,26 +1150,24 @@ export const useGraphStore = create<Store>()((set, get) => {
     },
 
     assignLocationLabel: async (locationId, labelId) => {
-      const before = get().locations[locationId];
       const updated = await guardScoped(() => api.assignLocationLabel(locationId, labelId));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [locationId]: updated } }));
-      if (before && before.groupId !== updated.groupId) afterStructureChange();
+      get().markTripStale(); // the room may have just gained a restart
     },
 
     unassignLocationLabel: async (locationId, labelId) => {
       const updated = await guardScoped(() => api.unassignLocationLabel(locationId, labelId));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [locationId]: updated } }));
+      get().markTripStale();
     },
 
     applyLocationLabelStyling: async (locationId, labelId) => {
-      const before = get().locations[locationId];
       const updated = await guardScoped(() => api.applyLocationLabelStyling(locationId, labelId));
       if (!updated) return;
       set((s) => ({ locations: { ...s.locations, [locationId]: updated } }));
       flash('Label Styling Applied');
-      if (before && before.groupId !== updated.groupId) afterStructureChange();
     },
 
     bulkAssignLocationLabel: async (locationIds, labelId) => {
@@ -935,6 +1189,7 @@ export const useGraphStore = create<Store>()((set, get) => {
       if (failed) set({ error: `Label applied to ${ok.length} of ${total} rooms — ${failed} failed` });
       else flash(`Label Applied To ${total} Rooms`);
       afterStructureChange();
+      get().markTripStale();
     },
 
     /* -------------------------------------------------- connection labels */
@@ -1010,7 +1265,7 @@ export const useGraphStore = create<Store>()((set, get) => {
 
     /* ----------------------------------------------------- connections */
     startConnectionFrom: (locationId) =>
-      set({ mode: 'connect', pendingSource: locationId, contextMenu: null }),
+      set({ mode: 'connect', pendingSource: locationId, contextMenu: null, pick: null }),
 
     cancelConnect: () => set({ mode: 'select', pendingSource: null }),
 

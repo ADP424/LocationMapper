@@ -47,7 +47,11 @@ the box: `2` is twice as wide and tall as a normal room, `0.5` half — the box,
 name, and its border all scale together, so the disparity with its neighbours holds
 at every zoom level), box/text colours, a free-form *layer* string, optional integer
 **coordinates** `(X, Y, Z)`, a *visited* flag, saved canvas position, any number of
-**labels**, and at most one **grouping**.
+**labels**, and any number of **groupings**. When a room belongs to several, the
+oldest membership is its layout **anchor** — the one grouping whose arrangement
+actually contains it; the rest simply reach out to it with corridors or a stretched
+box, and dragging the grouping's own box carries every member, not just the anchored
+ones.
 
 **Connection** — a way between two locations. Arrowheads are set independently per
 end: `A → B`, `A ← B`, `A ⇄ B`, or **no arrowheads at all**, which means *undirected*
@@ -62,19 +66,27 @@ a logarithmically-drawn **weight**, plus two special modes:
 * **Locked** — gated until every listed prerequisite location has been visited.
   Locked with no prerequisites means sealed for good.
 
-**Grouping** — a translucent rounded box behind a set of locations, with its own name,
-body colour and (independently settable) title colour. A grouping can also carry
-**default styling** — shape, size, box/text colour — which is stamped onto a room the
-moment it is *created* inside it. Moving a room in never restyles it; the inspector's
-**Re-Apply Styling** does, on demand. Groupings are created from the sidebar, from a
-room's right-click menu, or from a multi-selection, and are not drawn until at least
-one room is in them. Groupings nest arbitrarily deep; cycles are rejected by the API
-and enforced by a database trigger.
+**Grouping** — a translucent rounded box (or, as a display style, a form-fitted
+outline or a snake loop threaded through the members) behind a set of locations, with
+its own name, body colour and (independently settable) title colour. A grouping can
+also carry **default styling** — shape, size, box/text colour — which is stamped onto
+a room the moment it **joins** the grouping, whether by creation inside it or by
+being added to it later; the inspector's **Apply** chip re-stamps on demand.
+Groupings are created from the sidebar, from a room's right-click menu, or from a
+multi-selection, and are not drawn until at least one room is in them. Groupings nest
+arbitrarily deep (a separate concept from membership — a room can belong to any
+number of groupings regardless of nesting); cycles are rejected by the API and
+enforced by a database trigger.
 Overlapping groupings are **stacked**: on a coordinate layout they are ordered along
 the axis that plane does not show (X/Y → by Z, lowest underneath), and on every other
 layout by the area each box covers once positioning finishes, largest underneath. A
 sub-grouping always draws over its parent. The higher a box sits the more solid it is
-drawn, and the sidebar spells the order out as `Layer 3/5 (Z 2)`.
+drawn, and the sidebar spells the order out as `Layer 3/5 (Z 2)`. Clicking a point
+covered by several bodies always resolves to the topmost one — the same order the
+map already draws them in.
+Dragging a grouping's own box moves **every** member, not just the rooms it anchors —
+accepting that this can tear a member out of whichever other grouping it also
+belongs to, whose body simply reflows around the gap.
 Because a grouping box covers a lot of canvas, what a drag inside one does is a
 setting — and the same choice is available for rooms: **Always Draggable** (grabs, so
 you cannot pan over it), **Never Draggable** (always pans), or **Draggable When
@@ -92,7 +104,7 @@ a large room never buries a small one it overlaps. Rooms are opaque, so the occl
 stub shares its anchor room's layer.
 
 **Label** — a reusable category that *stamps* opt-in defaults onto whatever it is
-applied to. Location labels can set shape, box colour, text colour, size and grouping;
+applied to. Location labels can set shape, box colour, text colour and size;
 connection labels can set line/text colour, direction, line style, weight, ephemeral
 state and the whole lock condition. Applying a label writes those defaults
 immediately, so the **last label applied wins**, and every chip keeps an **Apply**
@@ -120,8 +132,8 @@ claims the colour. Label-over-label is unaffected: the last label applied always
 | Re-attach an end | Select a connection, drag either amber handle onto another room |
 | Inspect / edit | Click anything. Edits apply on **Apply** or when you click outside the panel. Controls that act immediately (labels, grouping, visited) never discard what you have typed — only **Revert** does |
 | Resize a room | Inspector → **Size** (or **Change Size** when several are selected) |
-| Multi-select | **Right-drag** empty space *or a grouping box* to marquee rooms; drag any one to move them all; the inspector mass-edits shape, grouping, colours and visited |
-| Groupings | Sidebar → **Groupings**, or right-click a room → **+ Create Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, deselect, ungroup, delete |
+| Multi-select | **Right-drag** empty space *or a grouping box* to marquee rooms; drag any one to move them all; the inspector mass-edits shape, groupings, colours and visited |
+| Groupings | Sidebar → **Groupings**, or right-click a room → **+ Create Grouping** / **Add To Grouping** / **Remove From Grouping**; right-click a grouping → create a room inside *or* outside it, move it into another grouping, deselect, ungroup, delete |
 | Labels | Sidebar → **Labels**; add chips from a location's or connection's inspector |
 | Mark visited | Double-click a room, or the inspector checkbox. **Reset All Visited** in the Trip Planner clears them all |
 | Search | Sidebar search with Notes / Locations / Connections toggles and a **Filter By Label** |
@@ -249,9 +261,11 @@ DELETE /connections/:id/labels/:labelId
 ```
 POST   /maps/:mapId/locations
 GET    /locations/:id
-PATCH  /locations/:id                 (groupId / coordX|Y|Z accept explicit null to clear)
+PATCH  /locations/:id                       (coordX|Y|Z accept explicit null to clear)
 DELETE /locations/:id
-POST   /locations/:id/group/apply     -> location   (re-stamp this room's own grouping's defaults)
+POST   /locations/:id/groups                { groupId, applyStyling? }  (join a grouping)
+DELETE /locations/:id/groups/:groupId                                   (leave a grouping)
+POST   /locations/:id/groups/:groupId/apply -> location  (re-stamp that grouping's defaults)
 
 POST   /maps/:mapId/connections
 GET    /connections/:id
@@ -265,9 +279,9 @@ DELETE /connections/:id
 
 ```
 maps ─┬─ groups ──────────── parent_id -> groups (nestable, cycle-checked)
-      ├─ location_labels ─── default_group_id -> groups
       ├─ connection_labels ─ connection_label_requirements -> locations
-      ├─ locations ────────┬ group_id -> groups
+      ├─ locations ────────┬ location_group_assignments -> groups (many-to-many;
+      │                    │   oldest assignment per room is the layout anchor)
       │                    └ location_label_assignments -> location_labels
       └─ connections ──────┬ source_id / target_id -> locations
                            ├ connection_requirements -> locations
@@ -344,11 +358,11 @@ are `CHECK`-constrained positive.
 
 ## Known gaps / decisions
 
-* A location's **grouping** picker and the **visited** checkbox apply immediately
-  rather than through Apply/Revert, because both trigger a re-layout that cannot be
-  meaningfully undone by reverting a text field. A grouping's own *parent* picker and
-  a label's default-grouping picker do go through the draft. Rows that come back from
-  an immediate action are *merged* into the open draft — fields you have touched are
+* A location's grouping chips (add/remove) and the **visited** checkbox apply
+  immediately rather than through Apply/Revert, because both trigger a re-layout that
+  cannot be meaningfully undone by reverting a text field. A grouping's own *parent*
+  picker does go through the draft. Rows that come back from an immediate action are
+  *merged* into the open draft — fields you have touched are
   kept, everything else follows the server — so applying a label never discards
   unsaved edits. If you edited a field **and** then applied a label that sets it, your
   value wins and is written on click-out; press **Revert** to take the label's instead.

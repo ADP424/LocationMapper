@@ -11,6 +11,13 @@ const SELECTOR =
 /** connectionId -> the edge (or the two stubs and two stub edges) that draw it. */
 export type ConnectionIndex = Map<string, Collection>;
 
+/** Just enough of the store's `PickState` to paint with. */
+export interface PickHighlight {
+  kind: 'location' | 'connection' | 'group';
+  candidates: Set<string> | null;
+  chosen: Set<string>;
+}
+
 /**
  * Built once per reconcile (not per click): every `cy.elements('[connectionId =
  * "…"]')` selector scan the old highlight pass did — several times per click —
@@ -29,9 +36,9 @@ export function buildConnectionIndex(cy: Core): ConnectionIndex {
 /**
  * Selection highlights are additive: the picked thing and its neighbourhood
  * are emphasised, and *nothing else changes* — no fading, no hidden names, no
- * dimmed surroundings. Only the trip planner dims, because a planned route is
- * explicitly a view of the route — and even that keeps the rest of the map
- * legible (see `.route-dim` in style.ts, a soft 45% rather than the old 18%).
+ * dimmed surroundings. Only the trip planner and an armed picker dim, because
+ * both are explicitly a *view of a subset* — and even they keep the rest of the
+ * map legible (see `.route-dim` in style.ts, a soft 45% rather than the old 18%).
  */
 export function applyHighlight(
   cy: Core,
@@ -40,12 +47,47 @@ export function applyHighlight(
   multi: string[],
   labelMembers: string[] = [],
   route: RoutePlan | null = null,
-  waypoints: string[] = []
+  waypoints: string[] = [],
+  pick: PickHighlight | null = null
 ) {
   const conn = (id: string) => index.get(id) ?? cy.collection();
 
   cy.batch(() => {
     cy.elements(SELECTOR).removeClass(CLASSES);
+
+    /* ----------------------------------------------------- armed picker */
+    /* outranks everything: while the canvas is a chooser, it shows choices */
+    if (pick) {
+      let eligible: Collection = cy.collection();
+      let taken: Collection = cy.collection();
+
+      if (pick.kind === 'location') {
+        const nodes = cy.nodes('.location').filter((n) => !pick.candidates || pick.candidates.has(n.id()));
+        eligible = nodes as unknown as Collection;
+        taken = nodes.filter((n) => pick.chosen.has(n.id())) as unknown as Collection;
+      } else if (pick.kind === 'connection') {
+        index.forEach((eles, cid) => {
+          if (pick.candidates && !pick.candidates.has(cid)) return;
+          eligible = eligible.union(eles);
+          if (pick.chosen.has(cid)) taken = taken.union(eles);
+        });
+      } else {
+        const nodes = cy
+          .nodes('.group')
+          .filter((n) => !pick.candidates || pick.candidates.has(n.data('groupId')));
+        eligible = nodes as unknown as Collection;
+        taken = nodes.filter((n) => pick.chosen.has(n.data('groupId'))) as unknown as Collection;
+      }
+
+      if (eligible.empty()) return;
+
+      /* a candidate's containers stay lit, or a room would float in a grey box */
+      const keep = eligible.union(eligible.nodes().parents());
+      cy.elements().difference(keep).addClass('route-dim');
+      eligible.addClass('hl-neighbor');
+      taken.removeClass('hl-neighbor').addClass('hl-primary');
+      return;
+    }
 
     /* ------------------------------------------------------ planned trip */
     if (route && (route.locationIds.length || route.connectionIds.length)) {

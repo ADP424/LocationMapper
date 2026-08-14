@@ -28,10 +28,12 @@ export function useContextMenu(handle: CanvasHandle | null, containerRef: RefObj
       if (ev.target !== cy || suppressMenuRef.current) return;
       useGraphStore.getState().openContextMenu(menuPoint(ev));
     };
+
     const onLocation = (ev: any) => {
       if (suppressMenuRef.current) return;
       useGraphStore.getState().openContextMenu({ ...menuPoint(ev), locationId: ev.target.id() });
     };
+
     const onGroup = (ev: any) => {
       if (suppressMenuRef.current) return;
       const store = useGraphStore.getState();
@@ -39,25 +41,30 @@ export function useContextMenu(handle: CanvasHandle | null, containerRef: RefObj
          when nothing else (room, name plate, ephemeral stub) is under the point */
       const hit = resolveLocationHit(handle, ev.position);
       if (hit?.hasClass('portal')) {
-        store.selectConnection(hit.data('connectionId'));
-        store.openContextMenu(menuPoint(ev));
+        const cid = hit.data('connectionId');
+        /* while picking, right-clicking must not retarget the panel that asked */
+        if (!store.pick) store.selectConnection(cid);
+        store.openContextMenu({ ...menuPoint(ev), connectionId: cid });
       } else if (hit) {
         store.openContextMenu({ ...menuPoint(ev), locationId: hit.id() });
       } else {
         store.openContextMenu({ ...menuPoint(ev), groupId: ev.target.data('groupId') });
       }
     };
+
     const onConnection = (ev: any) => {
       if (suppressMenuRef.current) return;
       const store = useGraphStore.getState();
-      store.selectConnection(ev.target.data('connectionId') ?? ev.target.id());
-      store.openContextMenu(menuPoint(ev));
+      const cid = ev.target.data('connectionId') ?? ev.target.id();
+      if (!store.pick) store.selectConnection(cid);
+      store.openContextMenu({ ...menuPoint(ev), connectionId: cid });
     };
 
     cy.on('cxttap', onCore);
     cy.on('cxttap', 'node.location', onLocation);
     cy.on('cxttap', 'node.group', onGroup);
     cy.on('cxttap', 'node.portal, edge', onConnection);
+
     return () => {
       cy.off('cxttap', onCore);
       cy.off('cxttap', 'node.location', onLocation);

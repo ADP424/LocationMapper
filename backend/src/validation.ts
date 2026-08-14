@@ -2,6 +2,10 @@ import { z } from 'zod';
 
 export const uuid = z.string().uuid();
 
+export const GROUP_DISPLAY_STYLES = ['rectangle', 'outline', 'loop'] as const;
+const displayStyle = z.enum(GROUP_DISPLAY_STYLES).optional();
+const bodyPadding = z.number().finite().min(0).max(400).nullable().optional();
+
 export const mapCreate = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().max(10_000).optional()
@@ -9,7 +13,9 @@ export const mapCreate = z.object({
 
 export const mapUpdate = z.object({
   name: z.string().trim().min(1).max(200).optional(),
-  description: z.string().max(10_000).optional()
+  description: z.string().max(10_000).optional(),
+  /** null clears it; the location must live on this map. */
+  startLocationId: uuid.nullable().optional()
 });
 
 export const groupCreate = z.object({
@@ -17,6 +23,8 @@ export const groupCreate = z.object({
   color: z.string().max(40).optional(),
   textColor: z.string().max(40).optional(),
   notes: z.string().max(100_000).optional(),
+  displayStyle,
+  bodyPadding,
   parentId: uuid.nullable().optional(),
   locationIds: z.array(uuid).max(10_000).optional(),
   defaultKind: z.string().max(60).optional(),
@@ -35,7 +43,8 @@ export const locationCreate = z.object({
   notes: z.string().max(100_000).optional(),
   color: z.string().max(40).optional(),
   textColor: z.string().max(40).optional(),
-  groupId: uuid.nullable().optional(),
+  /** Initial memberships; [0] becomes the anchor. */
+  groupIds: z.array(uuid).max(200).optional(),
   visited: z.boolean().optional(),
   x: z.number().finite().nullable().optional(),
   y: z.number().finite().nullable().optional(),
@@ -89,10 +98,13 @@ export const locationLabelCreate = z.object({
   defaultSize: z.number().finite().positive().max(25).nullable().optional(),
   defaultColor: z.string().max(40).optional(),
   defaultTextColor: z.string().max(40).optional(),
-  defaultGroupId: uuid.nullable().optional(),
-  overrideGroupings: z.boolean().optional()
+  overrideGroupings: z.boolean().optional(),
+  /** Replaces the whole set. Structure, never styling. */
+  restartTargets: z.array(uuid).max(200).optional(),
+  restartName: z.string().max(200).optional(),
+  /** 0 is legal: a restart may be declared free. */
+  restartWeight: z.number().finite().min(0).max(10_000).optional()
 });
-
 export const locationLabelUpdate = locationLabelCreate;
 
 export const connectionLabelCreate = z.object({
@@ -114,6 +126,11 @@ export const connectionLabelUpdate = connectionLabelCreate;
 
 export const labelAssign = z.object({
   labelId: uuid,
+  applyStyling: z.boolean().optional()
+});
+
+export const groupAssign = z.object({
+  groupId: uuid,
   applyStyling: z.boolean().optional()
 });
 
@@ -142,6 +159,8 @@ export const positionsUpdate = z.object({
 export const graphImport = z.object({
   name: z.string().trim().min(1).max(200),
   description: z.string().max(10_000).optional(),
+  /** Resolved against `locations[].key`; unresolvable means "no default start". */
+  startLocationKey: z.string().nullable().optional(),
   groups: z
     .array(
       z.object({
@@ -151,6 +170,8 @@ export const graphImport = z.object({
         color: z.string().max(40).optional(),
         textColor: z.string().max(40).optional(),
         notes: z.string().max(100_000).optional(),
+        displayStyle,
+        bodyPadding,
         defaultKind: z.string().max(60).optional(),
         defaultSize: z.number().finite().positive().max(25).nullable().optional(),
         defaultColor: z.string().max(40).optional(),
@@ -162,9 +183,10 @@ export const graphImport = z.object({
     .optional(),
   locationLabels: z
     .array(
-      locationLabelCreate.extend({
+      /* targets travel as keys, like every other cross-reference in an export */
+      locationLabelCreate.omit({ restartTargets: true }).extend({
         key: z.string().min(1).max(200),
-        defaultGroupKey: z.string().nullable().optional()
+        restartTargetKeys: z.array(z.string()).optional()
       })
     )
     .max(5_000)
@@ -180,9 +202,11 @@ export const graphImport = z.object({
     .optional(),
   locations: z
     .array(
-      locationCreate.omit({ groupId: true, coordX: true, coordY: true, coordZ: true }).extend({
+      locationCreate.omit({ groupIds: true, coordX: true, coordY: true, coordZ: true }).extend({
         key: z.string().min(1).max(200),
+        /** Legacy single membership, still accepted on import. */
         groupKey: z.string().nullable().optional(),
+        groupKeys: z.array(z.string()).optional(),
         labelKeys: z.array(z.string()).optional(),
         /* `coord × grid unit` can reach model-space extremes the renderer's
            extent model and coordinate layout were never sized for; imports

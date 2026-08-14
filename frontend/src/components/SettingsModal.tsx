@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   BASE_SCALE_RANGE,
+  COORDINATE_UNIT_RANGE,
   DRAG_LABELS,
   DRAG_MODES,
   EPHEMERAL_LABELS,
@@ -13,16 +14,7 @@ import {
 import { useGraphStore } from '../state/store';
 import { pushEscapeHandler } from '../utils/escapeStack';
 import { useFocusTrap } from './useFocusTrap';
-import { InlineCheckField } from './fields';
-
-/** The heading carries the meaning; the detail lives one hover away. */
-function Help({ text }: { text: string }) {
-  return (
-    <span className="help" title={text} aria-label={text}>
-      ?
-    </span>
-  );
-}
+import { Help, InlineCheckField } from './fields';
 
 function DragModeField({
   label,
@@ -212,6 +204,39 @@ export default function SettingsModal() {
             <span className="muted small">
               Off, The Zoom Stops At The Transition Point — Fit Will Not Show A Map Larger Than That.
             </span>
+          </div>
+        </section>
+
+        <section className="modal-section">
+          <h3>
+            Coordinate Grid Layouts
+            <Help text="Pixels between two adjacent coordinates on the X/Y, X/Z, and Y/Z layouts. Automatic recomputes it on every re-layout from how much room the rooms and their connection labels actually need; the field then just reports that value. Uncheck Automatic to pin a fixed spacing instead — the next re-layout uses it exactly, regardless of crowding." />
+          </h3>
+          <div className="slider-row">
+            <input
+              type="range"
+              min={COORDINATE_UNIT_RANGE[0]}
+              max={COORDINATE_UNIT_RANGE[1]}
+              step={1}
+              disabled={settings.autoCoordinateUnit}
+              value={settings.coordinateUnit}
+              onChange={(e) => setSettings({ coordinateUnit: Number(e.target.value) })}
+            />
+            <input
+              className="num"
+              type="number"
+              min={COORDINATE_UNIT_RANGE[0]}
+              max={COORDINATE_UNIT_RANGE[1]}
+              step={1}
+              disabled={settings.autoCoordinateUnit}
+              value={settings.coordinateUnit}
+              onChange={(e) => setSettings({ coordinateUnit: Number(e.target.value) })}
+            />
+            <InlineCheckField
+              label="Automatic"
+              checked={settings.autoCoordinateUnit}
+              onChange={(v) => setSettings({ autoCoordinateUnit: v })}
+            />
           </div>
         </section>
 
