@@ -7,7 +7,7 @@ import {
   type Axis,
   type CoordinateFrame
 } from './coordinateLayout';
-import { skeletonAt } from './viewScale';
+import { skeletonAt, skeletonBoundary } from './viewScale';
 
 /**
  * Level of detail for the coordinate lattice.
@@ -111,7 +111,7 @@ export function solveGrid(
   const screenStep = unit * zoom;
   if (!Number.isFinite(screenStep) || screenStep <= 0) return null;
 
-  const skeleton = skeletonAt(zoom, settings);
+  const skeleton = skeletonAt(zoom, skeletonBoundary(cy.minZoom(), settings));
   const stride = strideFor(screenStep, MIN_LINE_PX);
   const major = stride * MAJOR_EVERY;
   const labelStride = stride * screenStep >= MIN_LABEL_PX ? stride : major;

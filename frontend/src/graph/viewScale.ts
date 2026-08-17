@@ -5,6 +5,13 @@ import type { Settings } from '../state/settings';
 
 export const MIN_ZOOM = 2e-4;
 export const MAX_ZOOM = 8;
+/**
+ * The floor on a map small enough to fit comfortably — `zoomBounds`'s cap on
+ * how far out such a map may be pulled, and the reference the default
+ * transition threshold is calibrated against. It lives here, beside the range
+ * it belongs to, rather than in `zoomBounds`, which re-exports it.
+ */
+export const DEFAULT_MIN_ZOOM = 0.05;
 
 /** Names never grow past 32× their natural size, so Fit always has a solution. */
 export const MAX_COMPENSATION = 32;
@@ -96,18 +103,75 @@ export const EMPTY_BUDGET: ViewBudget = { labelCeiling: 0, labelled: 0, budget: 
 export type ScaleLimit = 'none' | 'density' | 'skeleton' | 'ceiling' | 'texture';
 
 /**
- * The one constant that places the boundary between the detailed view and the
- * zoomed-out skeleton: the rendered size, in pixels, of a *size-1* room's name
- * at the instant the two views swap. There is deliberately no hysteresis — the
- * boundary is a single zoom, crossed at the same place in both directions.
+ * The rendered size, in pixels, of a *size-1* room's name at the zoom the two
+ * views used to swap at. It is `FONT_MIN.location`, the size Cytoscape culls
+ * that name at anyway — which is what made the old boundary *derived* rather
+ * than chosen: names, room shapes and grouping titles all changed over together
+ * because they had to.
  *
- * It is `FONT_MIN.location` on purpose. That is the size at which Cytoscape
- * culls a room's name anyway, so the names, the room shapes and the grouping
- * titles all change over together. Raising it flips sooner (while further in);
- * lowering it below `FONT_MIN.location` would re-open a band of boxes with no
- * names in it.
+ * They no longer have to. The boundary is a setting now (below), and this
+ * constant survives only to calibrate its default. The interesting consequence
+ * is that lowering the threshold opens a band between the boundary and this
+ * legibility point in which **rooms are drawn with no names** — which is the
+ * whole point of making it adjustable, and costs nothing: Cytoscape's own
+ * `min-zoomed-font-size`, seeded from `FONT_MIN`, culls each name at exactly
+ * its own threshold, so big rooms keep their names longest and 1× rooms drop
+ * out first. Raising it flips early instead, hiding names that were still
+ * legible. Both are the user's call.
  */
 export const SKELETON_NAME_PX = FONT_MIN.location;
+
+/** The inverse of `thresholdZoom`. Used once: to calibrate the default. */
+export function zoomThreshold(zoom: number, floor: number): number {
+  const lo = Number.isFinite(floor) ? clamp(floor, MIN_ZOOM, MAX_ZOOM) : MIN_ZOOM;
+  if (lo >= MAX_ZOOM) return 0;
+  return clamp(Math.log(clamp(zoom, lo, MAX_ZOOM) / lo) / Math.log(MAX_ZOOM / lo), 0, 1);
+}
+
+/**
+ * Where the views used to swap: a size-1 room's name is `NAME_FONT × zoom`
+ * pixels tall at Name Size 1 with no compensation, and it was culled at
+ * `SKELETON_NAME_PX` — so the boundary sat at zoom 0.5. On a map whose floor is
+ * the nominal one, that is 45.4% of the way up the range, and *that* is the
+ * default, so an untouched install behaves exactly as it always did.
+ */
+export const DEFAULT_SKELETON_THRESHOLD =
+  Math.round(zoomThreshold(SKELETON_NAME_PX / NAME_FONT, DEFAULT_MIN_ZOOM) * 1000) / 1000;
+
+/**
+ * A position in the zoom range, as a zoom.
+ *
+ * Geometric, not linear: the range spans five decades, so a linear slider would
+ * spend nine tenths of its travel inside a band nobody can ever reach.
+ *
+ *   t = 0 -> the floor itself, i.e. the skeleton is never entered
+ *   t = 1 -> MAX_ZOOM, i.e. the skeleton is all there is
+ */
+export function thresholdZoom(threshold: number, floor: number): number {
+  const lo = Number.isFinite(floor) ? clamp(floor, MIN_ZOOM, MAX_ZOOM) : MIN_ZOOM;
+  const t = Number.isFinite(threshold) ? clamp(threshold, 0, 1) : DEFAULT_SKELETON_THRESHOLD;
+  if (lo >= MAX_ZOOM) return MAX_ZOOM;
+  return lo * Math.pow(MAX_ZOOM / lo, t);
+}
+
+/**
+ * The zoom the two views swap at, given the floor the zoom bounds have settled
+ * on. Feed it `cy.minZoom()`; the two cases agree by construction:
+ *
+ *   • skeleton allowed   — the floor *is* the fit floor, so the boundary sits
+ *     `skeletonThreshold` of the way above it;
+ *   • skeleton forbidden — `zoomBounds` has already *raised* the floor to meet
+ *     the boundary, so the boundary is the floor, and nothing below it is
+ *     reachable. Returning the floor therefore makes `skeletonAt` always false,
+ *     which is exactly what that setting means.
+ *
+ * This is why nothing has to rebuild the extent model to ask where the boundary
+ * is — and why `zoomBounds.zoomFloor`, the one function that is *computing*
+ * `cy.minZoom()`, must call `thresholdZoom` directly instead of this.
+ */
+export function skeletonBoundary(floor: number, settings: Settings): number {
+  return settings.allowSkeletonZoom ? thresholdZoom(settings.skeletonThreshold, floor) : floor;
+}
 /** A weight-1 connection's model width (see `weightToWidth(1)` in model.ts). */
 const REFERENCE_LINE_WIDTH = 3.5;
 /** The skeleton's centred grouping title is fitted to the grouping's own box,
@@ -161,35 +225,11 @@ export function textFactorAt(zoom: number, settings: Settings): number {
 
 /**
  * True exactly when the zoomed-out skeleton owns the canvas. Pure in `(zoom,
- * settings)`: the same zoom always gives the same answer, in both directions.
+ * boundary)`: the same zoom always gives the same answer, in both directions.
+ * There is still deliberately no hysteresis.
  */
-export function skeletonAt(zoom: number, settings: Settings): boolean {
-  const z = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
-  return NAME_FONT * settings.baseScale * textFactorAt(z, settings) * z < SKELETON_NAME_PX;
-}
-
-/**
- * The exact zoom at which the two views swap — the smallest zoom at which the
- * *detailed* view is drawn, and therefore the zoom floor when the user has
- * forbidden the skeleton outright.
- *
- * `g(z) = NAME_FONT · baseScale · f(z) · z` is non-decreasing in z (`f`
- * saturates at `MAX_COMPENSATION`, so even at strength 1 the product keeps
- * growing below the cap), so the boundary is found by bisecting the very
- * predicate the renderer uses. There is no closed form: `f` is a clamped power.
- */
-export function skeletonZoom(settings: Settings): number {
-  if (!skeletonAt(MIN_ZOOM, settings)) return MIN_ZOOM; // never skeletal
-  if (skeletonAt(MAX_ZOOM, settings)) return MAX_ZOOM; // always skeletal
-
-  let lo = MIN_ZOOM; // skeletal
-  let hi = MAX_ZOOM; // detailed
-  for (let i = 0; i < 48; i++) {
-    const mid = Math.sqrt(lo * hi); // geometric: the range spans five decades
-    if (skeletonAt(mid, settings)) lo = mid;
-    else hi = mid;
-  }
-  return hi;
+export function skeletonAt(zoom: number, boundary: number): boolean {
+  return clamp(zoom, MIN_ZOOM, MAX_ZOOM) < boundary;
 }
 
 /**
@@ -210,7 +250,12 @@ function easedStrength(settings: Settings, b: ViewBudget) {
   return { s: requested * (Math.log(hard / drawn) / Math.log(4)), eased: true };
 }
 
-export function solveViewScale(zoom: number, settings: Settings, b: ViewBudget): ViewScale {
+export function solveViewScale(
+  zoom: number,
+  settings: Settings,
+  b: ViewBudget,
+  boundary: number
+): ViewScale {
   const z = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
   const { s, eased } = easedStrength(settings, b);
   let limit: ScaleLimit = eased ? 'density' : 'none';
@@ -238,9 +283,9 @@ export function solveViewScale(zoom: number, settings: Settings, b: ViewBudget):
      One boolean drives names hiding, boxes fading, lines thickening and the
      grouping titles taking over, so the three can never drift apart by a
      frame. It is a pure function of the zoom, so the flip lands on exactly
-     the same zoom whether the user is zooming in or out, and SKELETON_NAME_PX
+     the same zoom whether the user is zooming in or out — `skeletonThreshold`
      is the single knob that moves it. */
-  const skeleton = skeletonAt(z, settings);
+  const skeleton = skeletonAt(z, boundary);
 
   /* ── names ────────────────────────────────────────────────────────────────
      Names are drawn exactly when the detailed view is. The skeleton *is* the
@@ -251,12 +296,12 @@ export function solveViewScale(zoom: number, settings: Settings, b: ViewBudget):
      shapes came back.
 
      Per-element culling is Cytoscape's `min-zoomed-font-size`, seeded from
-     `FONT_MIN` — and for a size-1 room that is the very same 6 px the skeleton
-     threshold uses, so the two agree by construction: the instant the rooms
-     reappear, their names are exactly at their own cull threshold and bigger
-     rooms' names are already past it. Density pressure is answered by easing
-     the compensation strength (`easedStrength`), which is precisely what hands
-     that per-element culling back when it is needed. */
+     `FONT_MIN`. At the *default* threshold a size-1 room's cull point and the
+     boundary coincide, so the two agree by construction. Below it they no
+     longer do, and that gap is the feature: the rooms keep being drawn while
+     their names cull themselves off one size at a time. Density pressure is
+     answered by easing the compensation strength (`easedStrength`), which is
+     precisely what hands that per-element culling back when it is needed. */
   const labels = !skeleton;
 
   /* The skeleton may be asked to drop the lines as well, leaving only the

@@ -11,6 +11,7 @@ import {
   IDENTITY_SCALE,
   OVERSIZE_TOLERANCE,
   scaleKey,
+  skeletonBoundary,
   solveViewScale,
   type ScaleLimit,
   type ViewBudget,
@@ -354,8 +355,10 @@ export class ViewScaler {
       y2: ext.y2 + ext.h * PAD + labelPad
     };
     const stale = this.gather(ext, near);
-
-    const next = solveViewScale(this.cy.zoom(), this.settings, this.budget);
+    /* the boundary follows the zoom floor, which follows the layout — one
+       multiply, read fresh each pass rather than cached and invalidated */
+    const boundary = skeletonBoundary(this.cy.minZoom(), this.settings);
+    const next = solveViewScale(this.cy.zoom(), this.settings, this.budget, boundary);
     const moved = scaleKey(next) !== this.key;
     const limitChanged = next.limit !== this.scale.limit;
     if (moved) this.applyScale(next, false);

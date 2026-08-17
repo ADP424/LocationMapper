@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { CoordinateFrame } from '../../graph/coordinateLayout';
 import { solveGrid, type GridLine } from '../../graph/coordinateGrid';
-import { skeletonAt } from '../../graph/viewScale';
+import { skeletonAt, skeletonBoundary } from '../../graph/viewScale';
 import type { Settings } from '../../state/settings';
 import { cssColor } from '../../utils/colors';
 import { applyCssTransform, createOverlaySurface, type OverlayView } from './overlayCanvas';
@@ -192,7 +192,7 @@ export function CoordinateGridRuler({ handle, frame, settings }: GridLayerProps)
 
     return (ctx, { cssW, cssH }) => {
       /* cheap out before the solve: the skeleton never carries numbers */
-      if (skeletonAt(cy.zoom(), settings)) return;
+      if (skeletonAt(cy.zoom(), skeletonBoundary(cy.minZoom(), settings))) return;
       const g = solveGrid(cy, frame, settings);
       if (!g || !g.labels) return;
 

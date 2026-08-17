@@ -8,6 +8,10 @@ import { layoutSpan } from './viewScale';
 const PADDING_SLACK = 4;
 /** Extra headroom inside a grouping for its title; this *does* scale with Base Size. */
 const LABEL_ROOM = 20;
+/** Floor for the median-based unit-size cap below, so a container of only a
+ *  couple of tiny/uniform units never clamps to something smaller than a
+ *  normal room. */
+const NOMINAL_UNIT_SPAN = 150;
 
 type Pos = { x: number; y: number };
 type Size = { w: number; h: number };
@@ -247,8 +251,30 @@ export async function computeGroupedLayout(
       return;
     }
 
+    /* breadthfirst/concentric/grid's avoidOverlap solves one *global* spacing
+       floor — `minDistance = max(w, h)` over every unit in the container —
+       and uses it between every pair, not just the pair that's actually big.
+       A nested sub-grouping's own box is a unit here, and it can legitimately
+       run to thousands of px while its sibling rooms sit around 100-200px; fed
+       in raw, that single outlier inflates the gap between every *other*,
+       ordinary-sized pair too, and since this container's own resulting box
+       becomes one unit in *its* parent's pass, the inflation compounds every
+       level up the group tree. fCoSE never needed this clamp — its spacing is
+       pairwise (ideal edge length / repulsion), not one shared scalar — so it
+       keeps seeing each unit's real size. */
+    const capFor = (() => {
+      if (name === 'fcose' || name === 'preset') return (s: Size) => s;
+      const spans = [...unitSize.values()].map((s) => Math.max(s.w, s.h)).sort((a, b) => a - b);
+      const median = spans[Math.floor(spans.length / 2)] ?? 0;
+      const cap = Math.max(median * 3, NOMINAL_UNIT_SPAN);
+      return (s: Size) => ({ w: Math.min(s.w, cap), h: Math.min(s.h, cap) });
+    })();
+
     const els: ElementDefinition[] = [];
-    unitSize.forEach((s, id) => els.push({ data: { id: `u:${id}`, w: s.w, h: s.h } }));
+    unitSize.forEach((s, id) => {
+      const c = capFor(s);
+      els.push({ data: { id: `u:${id}`, w: c.w, h: c.h } });
+    });
 
     const merged = new Map<string, number>();
     edges.forEach((e) => {

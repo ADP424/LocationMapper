@@ -1,10 +1,10 @@
 import type { Core } from 'cytoscape';
 import type { Settings } from '../state/settings';
 import { drawnExtentAt, extentModel, fitZoom } from './extent';
-import { MAX_ZOOM, MIN_ZOOM, skeletonZoom, textFactorAt } from './viewScale';
+import { DEFAULT_MIN_ZOOM, MAX_ZOOM, MIN_ZOOM, textFactorAt, thresholdZoom } from './viewScale';
 
-export { MAX_ZOOM, MIN_ZOOM };
-export const DEFAULT_MIN_ZOOM = 0.05;
+export { MAX_ZOOM, MIN_ZOOM, DEFAULT_MIN_ZOOM };
+
 export const FIT_PADDING = 60;
 
 /** Let the user pull back a little past a perfect fit. */
@@ -38,9 +38,12 @@ function zoomFloor(cy: Core, settings: Settings): number {
   const fit = solved
     ? Math.max(MIN_ZOOM, Math.min(DEFAULT_MIN_ZOOM, solved.zoom * FIT_SLACK))
     : DEFAULT_MIN_ZOOM;
-
   if (settings.allowSkeletonZoom) return fit;
-  return Math.min(MAX_ZOOM, Math.max(fit, skeletonZoom(settings)));
+  /* Refusing to enter the skeleton means its boundary *is* the floor. Computed
+     from `fit`, never from `skeletonBoundary(cy.minZoom(), …)`: `cy.minZoom()`
+     is the very value this function is about to set, and feeding it back in
+     would make the floor chase itself upward on every sync. */
+  return Math.min(MAX_ZOOM, Math.max(fit, thresholdZoom(settings.skeletonThreshold, fit)));
 }
 
 /** Only ever *lowered* below `DEFAULT_MIN_ZOOM` — unless the skeleton is

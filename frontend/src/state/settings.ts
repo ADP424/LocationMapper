@@ -1,3 +1,5 @@
+import { DEFAULT_SKELETON_THRESHOLD } from '../graph/viewScale';
+
 /** How a left-drag that starts on an element behaves. */
 export type DragMode =
   /** Grabs it, as it always has — the view cannot be panned over it. */
@@ -58,8 +60,15 @@ export interface Settings {
   /** Rendered thickness, in pixels, of a weight-1 connection inside the skeleton. */
   skeletonLineWidth: number;
   /**
-   * Allow zooming out past the point where the skeleton takes over. Off, that
-   * point *is* the zoom floor, so the detailed view is the only view.
+   * Where the detailed view gives way to the skeleton, as a fraction of the
+   * zoom range between "the whole map fits on screen" and maximum zoom.
+   * Geometric, and measured against the *live* floor, so it means the same
+   * thing on a five-room house and a fifty-thousand-room city. 0 = never flip.
+   */
+  skeletonThreshold: number;
+  /**
+   * Allow zooming out past that point. Off, the transition *is* the zoom floor,
+   * so the detailed view is the only view.
    */
   allowSkeletonZoom: boolean;
   /** Stop the trip planner after a while instead of searching exhaustively. */
@@ -95,6 +104,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ephemeralStyle: 'nodes',
   skeletonLines: true,
   skeletonLineWidth: 1.5,
+  /* exactly where the old, text-legibility-derived boundary sat */
+  skeletonThreshold: DEFAULT_SKELETON_THRESHOLD,
   allowSkeletonZoom: true,
   limitSearchTime: true,
   searchTimeLimitSeconds: 10,
@@ -171,6 +182,11 @@ export function normaliseSettings(
       Number(s?.skeletonLineWidth ?? DEFAULT_SETTINGS.skeletonLineWidth),
       SKELETON_LINE_WIDTH_RANGE[0],
       SKELETON_LINE_WIDTH_RANGE[1]
+    ),
+    skeletonThreshold: clamp(
+      Number(s?.skeletonThreshold ?? DEFAULT_SETTINGS.skeletonThreshold),
+      0,
+      1
     ),
     allowSkeletonZoom: s?.allowSkeletonZoom ?? DEFAULT_SETTINGS.allowSkeletonZoom,
     limitSearchTime: s?.limitSearchTime ?? DEFAULT_SETTINGS.limitSearchTime,

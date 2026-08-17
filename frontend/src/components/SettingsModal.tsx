@@ -16,6 +16,9 @@ import { pushEscapeHandler } from '../utils/escapeStack';
 import { useFocusTrap } from './useFocusTrap';
 import { Help, InlineCheckField } from './fields';
 
+const pct = (t: number) => Math.round(t * 100);
+const fromPct = (v: string) => Math.min(100, Math.max(0, Math.round(Number(v) || 0))) / 100;
+
 function DragModeField({
   label,
   value,
@@ -162,9 +165,37 @@ export default function SettingsModal() {
         <section className="modal-section">
           <h3>
             Zoomed-Out Skeleton
-            <Help text="Past the zoom where a size-1 room's name stops being legible, the map flips to its skeleton: rooms and names fade out, and each grouping shows its name centred in its box. The flip happens at exactly the same zoom whether you are zooming in or out. Connection lines can hold a constant on-screen thickness there — or be dropped entirely, leaving only the groupings, which is the cheapest way to look at a very large map." />
+            <Help text="Past the transition zoom below, the map flips to its skeleton: rooms and names fade out, and each grouping shows its name centred in its box. The flip happens at exactly the same zoom whether you are zooming in or out." />
           </h3>
           <div className="slider-row">
+            <span className="field-label">
+              Transition
+              <Help text="How far out you may zoom before the skeleton takes over, as a percentage of the range between “the whole map fits on screen” and maximum zoom — so it means the same thing on a five-room house and a fifty-thousand-room city. Lower it to keep the rooms drawn further out, past the point their names give up. 0% never flips at all." />
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={pct(settings.skeletonThreshold)}
+              onChange={(e) => setSettings({ skeletonThreshold: fromPct(e.target.value) })}
+            />
+            <input
+              className="num"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={pct(settings.skeletonThreshold)}
+              onChange={(e) => setSettings({ skeletonThreshold: fromPct(e.target.value) })}
+            />
+            <span className="muted small">%</span>
+          </div>
+          <div className="slider-row">
+            <span className="field-label">
+              Line Width
+              <Help text="Line thickness in pixels inside the skeleton — a weight-1 connection is drawn at exactly this, and every other weight keeps its ratio to it. Turn the lines off to leave only the groupings, which is the cheapest way to look at a very large map." />
+            </span>
             <input
               type="range"
               min={SKELETON_LINE_WIDTH_RANGE[0]}
@@ -190,20 +221,17 @@ export default function SettingsModal() {
               onChange={(v) => setSettings({ skeletonLines: v })}
             />
           </div>
-          <p className="muted small">
-            Line Thickness In Pixels — A Weight-1 Connection Is Drawn At Exactly This. Turn The Lines
-            Off To Leave Only The Groupings.
-          </p>
           <div className="slider-row">
             <InlineCheckField
-              label="Allow Zooming Out Into It"
-              title="Off, the zoom stops at the transition point, so the skeleton is never reached"
+              label={
+                <>
+                  Allow Zooming Out Into It
+                  <Help text="Off, the zoom stops at the transition point, so the skeleton is never reached — and Fit will not show a map larger than that. It is the strongest performance guard the app has, and it moves with the slider above." />
+                </>
+              }
               checked={settings.allowSkeletonZoom}
               onChange={(v) => setSettings({ allowSkeletonZoom: v })}
             />
-            <span className="muted small">
-              Off, The Zoom Stops At The Transition Point — Fit Will Not Show A Map Larger Than That.
-            </span>
           </div>
         </section>
 

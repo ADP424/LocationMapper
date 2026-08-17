@@ -35,7 +35,7 @@ volume recreates the database from that one file.
 ```bash
 docker compose up db
 cd backend  && npm install && DATABASE_URL=postgres://mapgraph:mapgraph@localhost:2345/mapgraph npm run dev
-cd frontend && npm install && npm run dev     # http://localhost:5173, /api proxied
+cd frontend && npm install && npm run dev     # http://localhost:8080, /api proxied
 ```
 
 ---

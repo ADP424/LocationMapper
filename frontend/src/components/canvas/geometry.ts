@@ -1,4 +1,5 @@
 import type { Core } from 'cytoscape';
+import { groupNodeId } from '../../graph/elements';
 import { invalidateExtent } from '../../graph/extent';
 import { applyGroupLayers, applyRoomLayers, computeGroupLayers } from '../../graph/layering';
 import { COORDINATE_LAYOUTS, isCoordinateLayout, type LayoutName } from '../../graph/layouts';
@@ -24,14 +25,22 @@ export interface GeometrySync {
   force?: boolean;
 }
 
-/** Grouping stack, room stack, and the `boxW`/`boxH` the titles are fitted to. */
-function restack(cy: Core, layeringSource: LayoutName, rooms: boolean) {
+/** Grouping stack, room stack, and the `boxW`/`boxH` the titles are fitted to.
+ *  Returns the grouping element ids whose box just changed, so the caller can
+ *  tell the ViewScaler its cached `tView`/`minFontView` for them is stale —
+ *  `measureGroupAreas` writes fresh boxes here every call, but a layout run
+ *  can force-write those groups' `tView` from the *old* box just beforehand
+ *  (`lockForLayout`'s unlock, ahead of this in the layout-completion order),
+ *  which otherwise leaves their title fit stuck to a stale, wrong-size box. */
+function restack(cy: Core, layeringSource: LayoutName, rooms: boolean): string[] {
   const { groups, locations } = useGraphStore.getState();
   const plane = isCoordinateLayout(layeringSource) ? COORDINATE_LAYOUTS[layeringSource] : null;
-  const layers = computeGroupLayers(cy, Object.values(groups), Object.values(locations), plane);
+  const groupList = Object.values(groups);
+  const layers = computeGroupLayers(cy, groupList, Object.values(locations), plane);
   applyGroupLayers(cy, layers);
   if (rooms) applyRoomLayers(cy, locations, plane);
   useGraphStore.getState().setGroupLayers(layers);
+  return groupList.map((g) => groupNodeId(g.id));
 }
 
 /**
@@ -70,7 +79,12 @@ function syncGeometry(handle: CanvasHandle, opts: GeometrySync) {
   else scaler.reposition();
 
   /* 2 ── draw order, grouping translucency, and each grouping's own box */
-  restack(cy, handle.layeringSourceRef.current, opts.rooms !== false);
+  const groupIds = restack(cy, handle.layeringSourceRef.current, opts.rooms !== false);
+  /* the boxes above may have just changed under a title fit the ViewScaler
+     already wrote (e.g. `lockForLayout`'s unlock, which force-writes `tView`
+     from whatever box each group held *before* this step) — mark them dirty
+     so step 6 re-derives the fit from the box actually just written */
+  scaler.markDirty(groupIds);
 
   /* 2b ── the form-fitted bodies: their geometry, their title anchors, and the
      bleed each compound box needs to actually contain what is drawn. Runs after
